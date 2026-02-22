@@ -1,0 +1,17 @@
+{
+  "name": "unigo-dex-contracts",
+  "version": "1.0.0",
+  "description": "UniGo-DEX 集中流动性 AMM 智能合约",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy.js --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
