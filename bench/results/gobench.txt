@@ -1,0 +1,74 @@
+pkg: unigo-dex/router
+cpu: Apple M2
+BenchmarkSimulateSwap/cross=0-8    	  288789	      4103 ns/op	    4857 B/op	     107 allocs/op
+BenchmarkSimulateSwap/cross=0-8    	  291945	      4106 ns/op	    4857 B/op	     107 allocs/op
+BenchmarkSimulateSwap/cross=0-8    	  291252	      4201 ns/op	    4857 B/op	     107 allocs/op
+BenchmarkSimulateSwap/cross=1-8    	  192213	      6336 ns/op	    7810 B/op	     162 allocs/op
+BenchmarkSimulateSwap/cross=1-8    	  192198	      6318 ns/op	    7810 B/op	     162 allocs/op
+BenchmarkSimulateSwap/cross=1-8    	  190623	      6279 ns/op	    7810 B/op	     162 allocs/op
+BenchmarkSimulateSwap/cross=5-8    	   88480	     13479 ns/op	   16261 B/op	     342 allocs/op
+BenchmarkSimulateSwap/cross=5-8    	   89583	     13485 ns/op	   16261 B/op	     342 allocs/op
+BenchmarkSimulateSwap/cross=5-8    	   89424	     13403 ns/op	   16261 B/op	     342 allocs/op
+BenchmarkSimulateSwap/cross=20-8   	   29952	     42325 ns/op	   48528 B/op	    1026 allocs/op
+BenchmarkSimulateSwap/cross=20-8   	   30388	     40210 ns/op	   48528 B/op	    1026 allocs/op
+BenchmarkSimulateSwap/cross=20-8   	   30306	     39578 ns/op	   48528 B/op	    1026 allocs/op
+BenchmarkRouteSearch/candidates=8/serial-8         	    6429	    187410 ns/op	  230339 B/op	    4688 allocs/op
+BenchmarkRouteSearch/candidates=8/serial-8         	    6225	    187136 ns/op	  230339 B/op	    4688 allocs/op
+BenchmarkRouteSearch/candidates=8/serial-8         	    6324	    188538 ns/op	  230340 B/op	    4688 allocs/op
+BenchmarkRouteSearch/candidates=8/workerpool-8     	   10000	    107605 ns/op	  231621 B/op	    4698 allocs/op
+BenchmarkRouteSearch/candidates=8/workerpool-8     	   10000	    108965 ns/op	  231620 B/op	    4698 allocs/op
+BenchmarkRouteSearch/candidates=8/workerpool-8     	   10000	    109092 ns/op	  231620 B/op	    4698 allocs/op
+BenchmarkRouteSearch/candidates=32/serial-8        	    1549	    755163 ns/op	  913280 B/op	   18655 allocs/op
+BenchmarkRouteSearch/candidates=32/serial-8        	    1610	    755480 ns/op	  913277 B/op	   18655 allocs/op
+BenchmarkRouteSearch/candidates=32/serial-8        	    1604	    751282 ns/op	  913277 B/op	   18655 allocs/op
+BenchmarkRouteSearch/candidates=32/workerpool-8    	    3242	    376564 ns/op	  918482 B/op	   18692 allocs/op
+BenchmarkRouteSearch/candidates=32/workerpool-8    	    3158	    385030 ns/op	  918484 B/op	   18692 allocs/op
+BenchmarkRouteSearch/candidates=32/workerpool-8    	    3156	    390564 ns/op	  918481 B/op	   18692 allocs/op
+BenchmarkRouteSearch/candidates=64/serial-8        	     754	   1523594 ns/op	 1822709 B/op	   37259 allocs/op
+BenchmarkRouteSearch/candidates=64/serial-8        	     766	   1527026 ns/op	 1822710 B/op	   37259 allocs/op
+BenchmarkRouteSearch/candidates=64/serial-8        	     806	   1511328 ns/op	 1822702 B/op	   37259 allocs/op
+BenchmarkRouteSearch/candidates=64/workerpool-8    	    1606	    744466 ns/op	 1833027 B/op	   37332 allocs/op
+BenchmarkRouteSearch/candidates=64/workerpool-8    	    1632	    776123 ns/op	 1833040 B/op	   37332 allocs/op
+BenchmarkRouteSearch/candidates=64/workerpool-8    	    1602	    767896 ns/op	 1833021 B/op	   37332 allocs/op
+BenchmarkRouteSearchConcurrent-8                   	    2816	    421004 ns/op	  918940 B/op	   18703 allocs/op
+BenchmarkRouteSearchConcurrent-8                   	    2773	    433986 ns/op	  918968 B/op	   18703 allocs/op
+BenchmarkRouteSearchConcurrent-8                   	    2678	    431663 ns/op	  919000 B/op	   18704 allocs/op
+pkg: unigo-dex/kline
+cpu: Apple M2
+BenchmarkOnSwap/pools=1-8         	 1000000	      1027 ns/op	    1108 B/op	      19 allocs/op
+BenchmarkOnSwap/pools=1-8         	 1000000	      1025 ns/op	    1108 B/op	      19 allocs/op
+BenchmarkOnSwap/pools=1-8         	 1000000	      1038 ns/op	    1108 B/op	      19 allocs/op
+BenchmarkOnSwap/pools=64-8        	  760867	      1587 ns/op	    1860 B/op	      30 allocs/op
+BenchmarkOnSwap/pools=64-8        	  817143	      1489 ns/op	    1859 B/op	      30 allocs/op
+BenchmarkOnSwap/pools=64-8        	  708060	      1440 ns/op	    1873 B/op	      30 allocs/op
+BenchmarkKlines-8                 	   71078	     16922 ns/op	   14598 B/op	     401 allocs/op
+BenchmarkKlines-8                 	   71344	     16852 ns/op	   14598 B/op	     401 allocs/op
+BenchmarkKlines-8                 	   70898	     17000 ns/op	   14598 B/op	     401 allocs/op
+pkg: unigo-dex/mev
+cpu: Apple M2
+BenchmarkOnSwap/swaps_per_block=5-8         	 6237666	       191.3 ns/op	       500.0 alerts_kept	     198 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=5-8         	 6283459	       192.0 ns/op	       500.0 alerts_kept	     198 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=5-8         	 6276879	       191.9 ns/op	       500.0 alerts_kept	     198 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4666035	       257.9 ns/op	       500.0 alerts_kept	     185 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4670444	       256.9 ns/op	       500.0 alerts_kept	     185 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4706415	       256.1 ns/op	       500.0 alerts_kept	     185 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4423287	       274.3 ns/op	       500.0 alerts_kept	     183 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4398350	       274.4 ns/op	       500.0 alerts_kept	     183 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4481262	       269.1 ns/op	       500.0 alerts_kept	     183 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=1000-8      	 4451709	       270.5 ns/op	       500.0 alerts_kept	     182 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=1000-8      	 4424385	       274.8 ns/op	       500.0 alerts_kept	     182 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=1000-8      	 4379493	       272.6 ns/op	       500.0 alerts_kept	     182 B/op	       3 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	21770089	        55.28 ns/op	      40 B/op	       0 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	21549885	        55.06 ns/op	      40 B/op	       0 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	21837801	        55.78 ns/op	      40 B/op	       0 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	23456779	        49.37 ns/op	      35 B/op	       0 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	24701989	        48.56 ns/op	      35 B/op	       0 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	24811222	        48.60 ns/op	      35 B/op	       0 allocs/op
+pkg: unigo-dex/indexer
+cpu: Apple M2
+BenchmarkReplay/indexer_only-8         	      84	  13191942 ns/op	    151608 blocks/s	   1516078 events/s	24461444 B/op	  250272 allocs/op
+BenchmarkReplay/indexer_only-8         	      90	  13358360 ns/op	    149719 blocks/s	   1497191 events/s	24461458 B/op	  250272 allocs/op
+BenchmarkReplay/indexer_only-8         	      90	  13256237 ns/op	    150873 blocks/s	   1508725 events/s	24461471 B/op	  250272 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      25	  44866368 ns/op	     44577 blocks/s	    445769 events/s	58374215 B/op	  813713 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      26	  44151566 ns/op	     45299 blocks/s	    452985 events/s	58374985 B/op	  813716 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      26	  44293526 ns/op	     45153 blocks/s	    451534 events/s	58373964 B/op	  813710 allocs/op

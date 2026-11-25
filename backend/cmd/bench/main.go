@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"math/rand"
 	"net/http"
 	"os"
 	"sort"
@@ -373,6 +374,7 @@ func sse(args []string) {
 	// 延迟测试：逐笔发交易（节点自动出块，发送返回时交易已上链），量到每个订阅端收到推送的时间
 	var latencies, spreads []float64
 	missing := 0
+	jitter := rand.New(rand.NewSource(1))
 	for i := 0; i < *events; i++ {
 		hash := s.swap(pool, i%2 == 0).Hex()
 		mined := time.Now()
@@ -404,7 +406,8 @@ func sse(args []string) {
 			}
 		}
 		spreads = append(spreads, float64(last.Sub(first).Microseconds())/1000)
-		time.Sleep(150 * time.Millisecond)
+		// 间隔随机（100~500 毫秒）：固定间隔会和索引器的轮询周期对上拍子，量出来的延迟会偏向某个固定值
+		time.Sleep(time.Duration(100+jitter.Intn(400)) * time.Millisecond)
 	}
 	sort.Float64s(latencies)
 	sort.Float64s(spreads)

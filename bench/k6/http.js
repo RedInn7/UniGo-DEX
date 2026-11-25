@@ -49,23 +49,28 @@ function uniqueAmount(base) {
   return (BigInt(base) + BigInt(__VU) * 1000000007n + BigInt(__ITER) * 1009n).toString();
 }
 
+// 每次请求的 URL 都不同时，k6 默认按 URL 给指标打标签，会产生几十万条时间序列、吃掉大量内存；
+// 统一用场景名当标签
+const params = { tags: { name: SCENARIO } };
+const get = (url) => http.get(url, params);
+
 const quoteURL = (tokenIn, tokenOut, amount) =>
   `${API}/api/v1/quote?token_in=${tokenIn}&token_out=${tokenOut}&amount_in=${amount}`;
 const pick = (list) => list[(__VU * 31 + __ITER) % list.length];
 
 const requests = {
   // 报价，缓存命中：所有请求同一个币对、同一个金额
-  quote_cached: () => http.get(quoteURL(WETH, USDC, "1000000000000000000")),
+  quote_cached: () => get(quoteURL(WETH, USDC, "1000000000000000000")),
   // 报价，缓存未命中，单跳：WETH → USDC，两个费率档的直连池各模拟一次
-  quote_miss_1hop: () => http.get(quoteURL(WETH, USDC, uniqueAmount("1000000000000000000"))),
+  quote_miss_1hop: () => get(quoteURL(WETH, USDC, uniqueAmount("1000000000000000000"))),
   // 报价，缓存命中，三跳
-  quote_cached_3hop: () => http.get(quoteURL(WETH, WBTC, "1000000000000000000")),
+  quote_cached_3hop: () => get(quoteURL(WETH, WBTC, "1000000000000000000")),
   // 报价，缓存未命中，三跳：WETH → USDC → DAI → WBTC，8 条候选路径，每条模拟 3 次 swap
-  quote_miss_3hop: () => http.get(quoteURL(WETH, WBTC, uniqueAmount("1000000000000000000"))),
+  quote_miss_3hop: () => get(quoteURL(WETH, WBTC, uniqueAmount("1000000000000000000"))),
   // K 线：六个池子轮流，最近 100 根 1m K 线
-  klines: () => http.get(`${API}/api/v1/klines?pool=${pick(pools)}&interval=1m&limit=100`),
+  klines: () => get(`${API}/api/v1/klines?pool=${pick(pools)}&interval=1m&limit=100`),
   // 成交：六个池子轮流，最近 50 笔
-  trades: () => http.get(`${API}/api/v1/trades?pool=${pick(pools)}&limit=50`),
+  trades: () => get(`${API}/api/v1/trades?pool=${pick(pools)}&limit=50`),
   // 构造待签名交易：每次不同金额，要重新搜路由并对链上 Quoter 做一次 eth_call
   build: () =>
     http.post(
@@ -77,7 +82,7 @@ const requests = {
         slippage: 0.005,
         recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
       }),
-      { headers: { "Content-Type": "application/json" } }
+      { headers: { "Content-Type": "application/json" }, tags: params.tags }
     ),
 };
 
@@ -88,9 +93,9 @@ const mix = [
   [5, requests.quote_miss_3hop],
   [20, requests.klines],
   [15, requests.trades],
-  [5, () => http.get(`${API}/api/v1/pools`)],
-  [5, () => http.get(`${API}/api/v1/mev/alerts?limit=50`)],
-  [5, () => http.get(`${API}/api/v1/status`)],
+  [5, () => get(`${API}/api/v1/pools`)],
+  [5, () => get(`${API}/api/v1/mev/alerts?limit=50`)],
+  [5, () => get(`${API}/api/v1/status`)],
 ];
 requests.mixed = () => {
   let r = Math.random() * 100;

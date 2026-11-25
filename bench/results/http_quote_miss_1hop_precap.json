@@ -1,0 +1,22 @@
+{
+  "scenario": "quote_miss_1hop",
+  "label": "precap",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 548039,
+  "rps": 27385.112263724648,
+  "p50_ms": 2.277,
+  "p95_ms": 9.911,
+  "p99_ms": 22.176619999999993,
+  "max_ms": 305.785,
+  "status_200": 548039,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 548039,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 762.4,
+  "load_avg_1m": 17.92
+}

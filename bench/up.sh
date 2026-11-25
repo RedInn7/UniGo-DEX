@@ -48,5 +48,7 @@ echo "[3/4] 灌入历史成交"
   node_modules/.bin/hardhat run ../bench/seed.js --network localhost) 2>&1 |
   tee "$RUN/seed.log" | grep "灌入" || { echo "灌入失败，见 $RUN/seed.log" >&2; exit 1; }
 
+mkdir -p "$ROOT/bench/results" && cp "$RUN/seed.json" "$ROOT/bench/results/seed.json"
+
 echo "[4/4] 启动后端"
 BENCH_REBUILD=1 "$ROOT/bench/backend.sh" start

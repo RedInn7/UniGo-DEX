@@ -1,0 +1,22 @@
+{
+  "scenario": "quote_cached",
+  "label": "r1",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 1032618,
+  "rps": 51627.97269394825,
+  "p50_ms": 1.14,
+  "p95_ms": 4.758,
+  "p99_ms": 9.35682999999999,
+  "max_ms": 79.256,
+  "status_200": 1032618,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 1032618,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 31.3,
+  "load_avg_1m": 21.8
+}

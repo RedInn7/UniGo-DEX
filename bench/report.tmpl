@@ -1,0 +1,160 @@
+# UniGo-DEX 后端压测报告
+
+本报告由 `bench/report.py` 根据 `bench/results/` 下的原始结果和模板 `bench/report.tmpl` 生成，每个数字都是实际跑出来的。
+复现方法见文末。
+
+## 1. 环境
+
+{{ENV}}
+
+读这些数字之前需要知道的几件事：
+
+- **压测端、后端、链节点在同一台 8 核笔记本上**。k6 发压本身就要占用几个核，所以 HTTP 的吞吐是"后端和 k6 抢 CPU"之下的结果，不是后端独占机器时的上限。
+- **机器同时在跑别的任务**，内存 8 GB 且长期在用交换区。每个 HTTP 场景结束时记录了 1 分钟系统负载，见 3.1 节。
+- 链节点是 Hardhat 本地节点，RPC 往返在同机回环上完成，没有网络延迟。涉及 RPC 的数字（构造交易、追块）换成远程节点会慢很多。
+- 后端日志级别为 warn，访问日志默认关闭（3.2 节单独量了打开访问日志的开销）。
+
+## 2. 数据规模
+
+由 `bench/up.sh` 拉起，固定随机种子，每次相同：
+
+- 合约：`scripts/deploy.js` 部署的全套合约，6 个池子（WETH/USDC 0.05% 和 0.3%、USDC/DAI 0.05% 和 0.3%、WBTC/DAI 0.3% 和 1%），覆盖三档费率；每个池子 4 个流动性头寸（一个宽区间、一个窄区间、上下各一个单边区间），所以有 8 个已初始化的 tick
+- 历史成交：{{SEED_SWAPS}} 笔单池 swap，三个账户随机在六个池子里交易，每个区块 {{SEED_PER_BLOCK}} 笔，区块间隔 {{SEED_SECS}} 秒，链头在区块 {{SEED_BLOCKS}}
+- 由此产生：每个池子约 500 笔成交、约 120 根 1m K 线（成交接口每池最多保留 1000 笔）；索引器从创世块追到链头共处理约 3000 个事件
+- 路由：WETH → USDC 有 2 条单跳候选路径；WETH → WBTC 必须走三跳（WETH → USDC → DAI → WBTC），每一跳有两个费率档可选，共 8 条候选路径
+
+## 3. HTTP 压测（k6）
+
+脚本 `bench/k6/http.js`。每个虚拟用户不停地发请求、不加思考时间。
+
+### 3.1 吞吐上限（限流、并发上限、访问日志全部关闭）
+
+{{HTTP}}
+
+说明：
+
+- "缓存命中"指所有请求的币对和金额相同。报价缓存的 key 包含最新区块号，压测期间链不出新块，所以除第一个请求外全部命中。
+- "缓存未命中"指每个请求的金额都不同，每次都要重新搜索路由并逐 tick 模拟。
+- `build` 每个请求还要对链上 Quoter 做一次 `eth_call`，吞吐受 Hardhat 节点限制。
+
+### 3.2 访问日志的开销
+
+{{ACCESSLOG}}
+
+访问日志开启的两个场景共处理 1,309,556 个请求，日志文件 203 MB（平均每个请求约 155 字节）。吞吐的差别在各轮之间的波动范围之内。访问日志这一组只跑了 1 轮。
+
+### 3.3 限流与背压生效
+
+吞吐上限是在关闭保护的情况下量的。下面两组打开保护，验证超限的请求确实被挡住。k6 的所有请求来自同一个 IP。
+
+{{PROTECTION}}
+
+- 第一行：令牌桶按 IP 限流。20 秒内理论上最多放行 200（突发）+ 100 × 20 = 2200 个请求，其余返回 429。
+- 第二行：全局并发信号量。同时在处理的请求超过 20 个时，新请求立即返回 503（带 `Retry-After`），不排队。
+- "后端计数"是 `http_rate_limited_total` / `http_concurrency_rejected_total` 两个指标在压测期间的增量，应与 k6 看到的 429 / 503 数量一致。
+
+背压这一组最初跑的时候，每拒绝一个请求打一行 warn 日志，20 秒写了 82 MB 日志；改为 debug 级别后重跑，同样条件下放行的请求数从 {{BP_BEFORE}} 增加到 {{BP_AFTER}}（各 1 轮）。表里是修改后的结果。
+
+### 3.4 压测中发现并修复的问题：缓存无上限
+
+报价缓存的 key 里带着金额。"缓存未命中"场景每个请求一个新 key，修改前这些条目要等 30 秒 TTL 到期才清理，20 秒压测结束时后端常驻内存涨到几百 MB，而且只要请求不停就会继续涨。修改：缓存加条目数上限（默认 10000），超过后按写入顺序淘汰；底层从 `sync.Map` 换成 map + 读写锁。
+
+{{CACHECAP}}
+
+## 4. SSE 推送
+
+工具 `backend/cmd/bench`（`sse` 子命令）。N 个订阅端同时在线，订阅成交事件。
+
+{{SSE}}
+
+- **端到端延迟**：从"发交易的 RPC 返回（Hardhat 自动出块，此时交易已上链）"到"订阅端读到这笔成交的推送"。它包含索引器的轮询等待：压测时轮询间隔设为 200 毫秒（`POLL_INTERVAL_MS=200`），默认值是 2 秒，用默认值时这一项会相应变大。
+- **扇出**：同一笔成交，最早收到的订阅端和最晚收到的订阅端之间差多久，反映 Hub 把一条消息发给所有订阅端要多久。
+- **突发与慢客户端**：关掉自动出块，把成交按每个区块 100 笔打包，短时间灌入。"只连不读"的客户端建立连接后不读取任何数据，它的发送队列（256 条）和内核缓冲区填满后被 Hub 断开，`stream_dropped_clients_total` 计数；正常订阅端不受影响。
+
+## 5. Go 基准
+
+`go test -bench`，每个基准跑 3 次取中位数。基准名前面是包名。"换算吞吐"是 1 秒 ÷ 单次耗时；除了 `workerpool` 和 `RouteSearchConcurrent` 两类会用到多个核，其余都是单协程执行，即单核吞吐。
+
+{{GOBENCH}}
+
+各组说明：
+
+- `SimulateSwap/cross=N`：单池逐 tick 模拟一笔 swap，穿越 N 个已初始化的 tick。
+- `RouteSearch/candidates=N`：三跳路由搜索，N 条候选路径，每条要模拟 3 次 swap；`serial` 是逐条评估，`workerpool` 是交给 Worker Pool 并发评估。
+- `RouteSearchConcurrent`：32 条候选路径，多个协程同时发起搜索（`b.RunParallel`），ns/op 是摊到每次搜索上的时间。
+- `kline.OnSwap/pools=N`：写入一笔成交并更新 6 个周期的 K 线。`kline.Klines`：查询最近 100 根 1m K 线（成交量从定点整数转成十进制字符串，每根 K 线 4 次分配）。
+- `mev.OnSwap/swaps_per_block=N`、`mev.OnSwapWorstCase`：三明治检测处理一笔 swap。
+- `Replay`：索引器回放 2000 个区块、2 万个事件（内存数据源，不含 RPC），`with_kline_mev_oracle` 带上 K 线、三明治检测、预言机三个订阅者。
+
+### 5.1 路由：串行评估 对比 Worker Pool 并发评估
+
+{{ROUTE}}
+
+### 5.2 修改前后对比：索引器逐事件日志
+
+修改前索引器每处理一个事件用 `log.Printf` 打一行日志；修改后改为结构化日志的 debug 级别，默认不输出。两次基准都把日志输出丢弃，量的是格式化本身的开销。
+
+带订阅者的那一行（`with_kline_mev_oracle`）在两次测量之间还经历了另外两处改动：K 线成交量改为定点整数并增加回滚检查点（写入变慢，见下表之后的说明）、三明治检测改写。所以它的提升幅度比只有索引器的那一行小。
+
+{{REPLAY}}
+
+### 5.3 修改前后对比：三明治检测
+
+修改前每笔新 swap 向前逐个配对，最坏 O(n²)；修改后按交易方和方向建索引，每笔 O(log n)。`OnSwap` 是随机输入（交易经常被配对成三明治后清空，序列很短），`OnSwapWorstCase` 是同一个地址在一个区块里来回买卖、没有别人的交易。
+
+{{MEV}}
+
+`mev.OnSwap` 在随机输入下修改后略慢（要维护索引）；最不利输入下，修改前的单笔耗时随区块内 swap 数增长，修改后不随之增长。
+
+K 线写入（`kline.OnSwap/pools=1`）在改用定点整数成交量和回滚检查点之前是 751 ns/op、16 次分配（当时只跑了 1 次，200 毫秒），之后见 5 节总表。这是用写入速度换成交量精确和回滚精确。
+
+## 6. 索引追块与 Reorg 重建
+
+工具 `backend/cmd/bench`（`chase` 子命令）。对着 Hardhat 节点，从创世块追到链头，带上全部订阅者（预言机、K 线、三明治检测、套利扫描），日志丢弃。
+
+{{CHASE}}
+
+- 追块速度主要取决于 RPC 往返次数：修改前每个区块 2 次（区块头 + 日志），修改后区块头仍是每块 1 次，日志改为每 500 个区块 1 次。
+- "修改前"一行是改动之前在同一套环境上量的（当时链上多 33 个区块，是前一次 Reorg 测试留下的）。两行之间除了批量拉日志，还隔着 5.2 节的逐事件日志改动，两者的效果叠在一起。
+- Reorg 测试每次回滚 10 个区块、重新索引 11 个区块，每个区块 2 笔成交。
+
+## 7. 波动与可信度
+
+- 每个 HTTP 场景跑了 3 轮，表里给了 RPS 的最小值和最大值；延迟取 RPS 居中的那一轮。
+- Go 基准每个跑 3 次，表里给了 ns/op 的范围。
+- 追块跑了 6 次、Reorg 5 次，表里给了范围。
+- 受机器负载影响最大的是 HTTP 的吞吐和尾延迟（p99）：k6 与后端争用 CPU，其它任务一占用 CPU，RPS 就下降、p99 就上升。绝对值只能代表"这台有其它负载的 8 核笔记本"，换机器或把压测端分离出去都会不同。
+- 相对结论（缓存命中比未命中快多少、Worker Pool 的加速比、修改前后的对比）受负载影响小得多，因为对比的两边是在相近的条件下量的。
+- 访问日志、限流、背压、缓存上限的对比各只跑了 1 轮。
+
+## 8. 复现
+
+```bash
+# 依赖：Go、Node.js、k6；contracts/ 下已执行过 npm install
+bench/run-all.sh          # 全部步骤，约 25 分钟，最后生成本报告
+```
+
+分步执行：
+
+```bash
+bench/up.sh                                   # 节点 + 合约 + 历史成交 + 后端（保护全关）
+LABEL=r1 bench/run-http.sh                    # 8 个 HTTP 场景，100 并发 × 20 秒
+LABEL=r1 bench/run-http.sh quote_cached       # 只跑一个场景
+VUS=50 DURATION=30s LABEL=x bench/run-http.sh mixed
+
+ACCESS_LOG=on LOG_LEVEL=info bench/backend.sh start        # 换一种后端配置后重跑
+RATE_LIMIT_PER_IP=100 RATE_LIMIT_BURST=200 MAX_CONCURRENT=500 bench/backend.sh start
+RATE_LIMIT_PER_IP=0 MAX_CONCURRENT=20 bench/backend.sh start
+
+cd backend
+go run ./cmd/bench sse -clients 200 -events 40
+go run ./cmd/bench sse -clients 200 -stalled 5 -events 0 -burst 6000
+go run ./cmd/bench chase -runs 6 -reorg-depth 10 -reorg-runs 5
+go test -p 2 -run '^$' -bench . -benchmem -count 3 ./router ./kline ./mev ./indexer
+cd ..
+
+bench/down.sh                                 # 停掉后端和节点
+python3 bench/report.py                       # 由 bench/results/ 重新生成本报告
+```
+
+带"修改前"字样的对比数据（`*.before.*`、`*_precap.json`）是在对应改动之前的代码上量的，重跑 `run-all.sh` 不会覆盖它们。
