@@ -86,7 +86,7 @@ func init() {
 //
 // 用区块哈希过滤：区块若已被 Reorg 掉，节点会报错而不是返回另一条分叉上的日志。
 func (c *Client) BlockEvents(ctx context.Context, block *indexer.BlockInfo) ([]interface{}, error) {
-	// ponytail: 每个区块一次 FilterLogs，追大量历史区块偏慢；需要时改成按区块范围批量拉取
+	// 已知上限：每个区块一次 FilterLogs，追大量历史区块偏慢；需要时改成按区块范围批量拉取
 	hash := common.HexToHash(block.Hash)
 	logs, err := c.FilterLogs(ctx, ethereum.FilterQuery{
 		BlockHash: &hash,

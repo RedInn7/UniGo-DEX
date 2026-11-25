@@ -61,7 +61,7 @@ type Candle struct {
 	High     float64 `json:"high"`
 	Low      float64 `json:"low"`
 	Close    float64 `json:"close"`
-	// ponytail: 成交量用 float64 累加，画图精度足够；需要精确到 wei 时改成 big.Int
+	// 已知上限：成交量用 float64 累加，画图精度足够；需要精确到 wei 时改成 big.Int
 	Volume0 float64 `json:"volume0"` // token0 成交量（最小单位）
 	Volume1 float64 `json:"volume1"` // token1 成交量（最小单位）
 	Trades  int     `json:"trades"`  // 成交笔数
@@ -174,7 +174,7 @@ func (a *Aggregator) rollback(p *poolData, forkBlock uint64) {
 	}
 
 	// 1m：用这一分钟内幸存的成交重算
-	// ponytail: 这一分钟开始以来的成交若超过 MaxTrades，早期成交已被淘汰，重算出的这根 1m 会缺数据；
+	// 已知上限：这一分钟开始以来的成交若超过 MaxTrades，早期成交已被淘汰，重算出的这根 1m 会缺数据；
 	// 需要时把成交的保留策略改成"回滚窗口内不淘汰"
 	from := sort.Search(len(p.trades), func(i int) bool { return p.trades[i].Timestamp >= minute })
 	for _, t := range p.trades[from:] {

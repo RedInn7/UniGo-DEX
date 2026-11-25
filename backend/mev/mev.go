@@ -56,7 +56,7 @@ func DefaultConfig() Config {
 }
 
 // 单个区块内每个池子参与检测的 swap 数上限
-// ponytail: 检测对每笔新 swap 是 O(n²)，n 有上限所以够用；真有单池单块上千笔 swap 再换成按地址索引
+// 已知上限：检测对每笔新 swap 是 O(n²)，n 有上限所以够用；真有单池单块上千笔 swap 再换成按地址索引
 const maxSwapsPerBlock = 256
 
 var (
