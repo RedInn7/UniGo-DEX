@@ -300,6 +300,18 @@ describe("UniGoPool", function () {
     });
   });
 
+  describe("Manager 回调权限", function () {
+    it("直接调用回调不能划走已授权用户的 token", async function () {
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address"],
+        [await token0.getAddress(), await token1.getAddress()]
+      );
+      // owner 已 approve Manager，user 试图借回调把 owner 的 token 转给自己
+      await expect(manager.connect(user).uniGoSwapCallback(100, 0, data)).to.be.revertedWith("CB");
+      await expect(manager.connect(user).uniGoMintCallback(100, 0, data)).to.be.revertedWith("CB");
+    });
+  });
+
   describe("闪电贷 (flash)", function () {
     let borrower;
     let borrowerAddr;

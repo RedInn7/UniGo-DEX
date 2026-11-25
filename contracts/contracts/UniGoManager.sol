@@ -44,7 +44,21 @@ contract UniGoManager is IUniGoPoolCallbacks {
     struct CallbackData {
         address token0;    // token0 地址
         address token1;    // token1 地址
-        address payer;     // 付款者地址
+    }
+
+    /// @dev 当前正在处理的 Pool 和付款者，仅在 mint/swap 调用期间有值
+    ///      回调只认这两个值，防止任何人直接调用回调、划走已授权用户的 token
+    address private _callbackPool;
+    address private _callbackPayer;
+
+    /// @dev 记录本次调用的 Pool 和付款者，调用结束后清空
+    modifier callbackContext(address pool) {
+        require(_callbackPool == address(0), "LOK");
+        _callbackPool = pool;
+        _callbackPayer = msg.sender;
+        _;
+        _callbackPool = address(0);
+        _callbackPayer = address(0);
     }
 
     /// @dev 期限保护：交易在内存池里滞留过久时直接作废，
@@ -61,6 +75,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
     function mint(MintParams calldata params)
         external
         checkDeadline(params.deadline)
+        callbackContext(params.pool)
         returns (uint256 amount0, uint256 amount1)
     {
         IUniGoPool pool = IUniGoPool(params.pool);
@@ -76,8 +91,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
             params.amount,
             abi.encode(CallbackData({
                 token0: token0_,
-                token1: token1_,
-                payer: msg.sender
+                token1: token1_
             }))
         );
 
@@ -93,6 +107,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
     function swap(SwapParams calldata params)
         external
         checkDeadline(params.deadline)
+        callbackContext(params.pool)
         returns (int256 amount0, int256 amount1)
     {
         (address token0_, address token1_) = _getPoolTokens(params.pool);
@@ -104,8 +119,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
             params.sqrtPriceLimitX96,
             abi.encode(CallbackData({
                 token0: token0_,
-                token1: token1_,
-                payer: msg.sender
+                token1: token1_
             }))
         );
 
@@ -120,18 +134,21 @@ contract UniGoManager is IUniGoPoolCallbacks {
     /// @inheritdoc IUniGoPoolCallbacks
     /// @dev Pool 在 mint 计算完成后回调此函数
     ///      Manager 从 payer（用户）处转入所需的 token 到 Pool
+    ///      只接受当前 mint/swap 所调用的 Pool 发起的回调
     function uniGoMintCallback(
         uint256 amount0Owed,
         uint256 amount1Owed,
         bytes calldata data
     ) external override {
+        require(msg.sender == _callbackPool, "CB");
         CallbackData memory decoded = abi.decode(data, (CallbackData));
+        address payer = _callbackPayer;
 
         if (amount0Owed > 0) {
-            IERC20(decoded.token0).transferFrom(decoded.payer, msg.sender, amount0Owed);
+            IERC20(decoded.token0).transferFrom(payer, msg.sender, amount0Owed);
         }
         if (amount1Owed > 0) {
-            IERC20(decoded.token1).transferFrom(decoded.payer, msg.sender, amount1Owed);
+            IERC20(decoded.token1).transferFrom(payer, msg.sender, amount1Owed);
         }
     }
 
@@ -148,13 +165,15 @@ contract UniGoManager is IUniGoPoolCallbacks {
         int256 amount1Delta,
         bytes calldata data
     ) external override {
+        require(msg.sender == _callbackPool, "CB");
         CallbackData memory decoded = abi.decode(data, (CallbackData));
+        address payer = _callbackPayer;
 
         if (amount0Delta > 0) {
-            IERC20(decoded.token0).transferFrom(decoded.payer, msg.sender, uint256(amount0Delta));
+            IERC20(decoded.token0).transferFrom(payer, msg.sender, uint256(amount0Delta));
         }
         if (amount1Delta > 0) {
-            IERC20(decoded.token1).transferFrom(decoded.payer, msg.sender, uint256(amount1Delta));
+            IERC20(decoded.token1).transferFrom(payer, msg.sender, uint256(amount1Delta));
         }
     }
 
