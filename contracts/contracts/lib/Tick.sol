@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./LiquidityMath.sol";
+import "./TickMath.sol";
 
 /// @title Tick
 /// @notice Tick 状态管理库
@@ -31,6 +32,19 @@ library Tick {
         bool initialized;
     }
 
+    /// @notice 由 tickSpacing 推导单个 tick 允许承载的最大流动性
+    /// @dev 把 uint128 的容量平均分给所有可用的 tick，
+    ///      保证即使每个 tick 都被用满，全局活跃流动性也不会溢出 uint128，
+    ///      同时让 liquidityNet（int128）不可能溢出
+    /// @param tickSpacing tick 间距
+    /// @return 单个 tick 的 liquidityGross 上限
+    function tickSpacingToMaxLiquidityPerTick(int24 tickSpacing) internal pure returns (uint128) {
+        int24 minTick = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
+        int24 maxTick = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
+        uint24 numTicks = uint24((maxTick - minTick) / tickSpacing) + 1;
+        return type(uint128).max / numTicks;
+    }
+
     /// @notice 更新 tick 的流动性信息
     /// @dev 当用户添加或移除流动性时调用
     /// @param self tick 状态映射
@@ -40,6 +54,7 @@ library Tick {
     /// @param feeGrowthGlobal0X128 token0 的全局累计手续费
     /// @param feeGrowthGlobal1X128 token1 的全局累计手续费
     /// @param upper 是否为 position 的上界 tick
+    /// @param maxLiquidity 单个 tick 允许承载的最大流动性
     /// @return flipped tick 的初始化状态是否发生了翻转
     ///         （从无引用变为有引用，或从有引用变为无引用）
     function update(
@@ -49,12 +64,16 @@ library Tick {
         int128 liquidityDelta,
         uint256 feeGrowthGlobal0X128,
         uint256 feeGrowthGlobal1X128,
-        bool upper
+        bool upper,
+        uint128 maxLiquidity
     ) internal returns (bool flipped) {
         Tick.Info storage info = self[tick];
 
         uint128 liquidityGrossBefore = info.liquidityGross;
         uint128 liquidityGrossAfter = LiquidityMath.addDelta(liquidityGrossBefore, liquidityDelta);
+
+        // 超过上限会让 liquidityNet 和全局活跃流动性失真，直接拒绝
+        require(liquidityGrossAfter <= maxLiquidity, "LO");
 
         // 判断初始化状态是否翻转
         flipped = (liquidityGrossAfter == 0) != (liquidityGrossBefore == 0);
@@ -72,9 +91,10 @@ library Tick {
 
         // 上界 tick 的 liquidityNet 方向相反
         // 这确保从左向右穿过时：进入区间加流动性，离开区间减流动性
+        // 直接用 int128 做受检运算，溢出时 revert 而不是静默截断
         info.liquidityNet = upper
-            ? int128(int256(info.liquidityNet) - liquidityDelta)
-            : int128(int256(info.liquidityNet) + liquidityDelta);
+            ? info.liquidityNet - liquidityDelta
+            : info.liquidityNet + liquidityDelta;
 
         // 如果流动性清零，重置初始化标记
         if (liquidityGrossAfter == 0) {

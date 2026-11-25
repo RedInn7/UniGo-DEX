@@ -62,6 +62,8 @@ contract UniGoPool is IUniGoPool {
     int24 public immutable tickSpacing;
     /// @notice 创建此池的工厂合约地址
     address public immutable factory;
+    /// @notice 单个 tick 允许承载的最大流动性（由 tickSpacing 决定）
+    uint128 public immutable maxLiquidityPerTick;
 
     // ==================== 核心状态 ====================
 
@@ -153,6 +155,7 @@ contract UniGoPool is IUniGoPool {
         token1 = _token1;
         fee = _fee;
         tickSpacing = _tickSpacing;
+        maxLiquidityPerTick = Tick.tickSpacingToMaxLiquidityPerTick(_tickSpacing);
     }
 
     // ==================== 初始化 ====================
@@ -630,11 +633,13 @@ contract UniGoPool is IUniGoPool {
         if (liquidityDelta != 0) {
             // 下界 tick（upper=false，穿过时流动性增加）
             flippedLower = ticks.update(
-                tickLower, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, false
+                tickLower, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, false,
+                maxLiquidityPerTick
             );
             // 上界 tick（upper=true，穿过时流动性减少）
             flippedUpper = ticks.update(
-                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true
+                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true,
+                maxLiquidityPerTick
             );
 
             // 如果 tick 的初始化状态发生翻转，更新位图
