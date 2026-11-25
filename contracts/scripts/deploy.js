@@ -5,7 +5,7 @@
  * 1. 核心合约：UniGoFactory / UniGoManager / UniGoQuoter / FlashArbitrage
  * 2. 测试代币：WETH / USDC / DAI / WBTC（都是 18 位小数）
  * 3. 六个池子，覆盖三档费率，能组成多跳路径：
- *      WETH/USDC 0.05% 和 0.3%、USDC/DAI 0.05% 和 0.3%、DAI/WBTC 0.3% 和 1%
+ *      WETH/USDC 0.05% 和 0.3%、USDC/DAI 0.05% 和 0.3%、WBTC/DAI 0.3% 和 1%
  * 4. 每个池子初始化价格并注入流动性（一个宽区间打底，叠加窄区间和单边区间）
  * 5. 模拟的 Chainlink 聚合器（ETH / USD）
  * 6. 给前几个测试账户铸币并授权 Manager，方便直接发起交易

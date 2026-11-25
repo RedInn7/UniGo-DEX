@@ -102,8 +102,11 @@ func TestRateLimitBurstThenSustainedRate(t *testing.T) {
 	if got := count(200); got < 80 || got > 84 {
 		t.Fatalf("burst let %d requests through, want about 80", got)
 	}
-	time.Sleep(500 * time.Millisecond) // 50/s × 0.5s ≈ 25 个
-	if got := count(200); got < 23 || got > 30 {
-		t.Fatalf("after 500ms %d more requests passed, want about 25", got)
+	// 按实际经过的时间算上限：机器繁忙时 Sleep 会超出 500ms，补进来的 token 也相应变多
+	start := time.Now()
+	time.Sleep(500 * time.Millisecond)
+	got := count(200)
+	if max := int(50*time.Since(start).Seconds()) + 5; got < 23 || got > max {
+		t.Fatalf("after %v %d more requests passed, want between 23 and %d", time.Since(start), got, max)
 	}
 }
