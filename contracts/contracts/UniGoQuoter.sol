@@ -57,6 +57,11 @@ contract UniGoQuoter is IUniGoPoolCallbacks {
         revert("NOT_SUPPORTED");
     }
 
+    /// @dev flash 回调 — Quoter 不需要实现，直接 revert
+    function uniGoFlashCallback(uint256, uint256, bytes calldata) external pure override {
+        revert("NOT_SUPPORTED");
+    }
+
     /// @dev swap 回调 — 不转入 token，而是 revert 携带计算结果
     function uniGoSwapCallback(
         int256 amount0Delta,

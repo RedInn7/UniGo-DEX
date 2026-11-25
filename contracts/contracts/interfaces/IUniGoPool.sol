@@ -8,6 +8,7 @@ pragma solidity ^0.8.20;
 ///      - 添加/移除流动性（mint/burn）
 ///      - 代币交换（swap）
 ///      - 提取手续费（collect）
+///      - 闪电贷（flash）
 interface IUniGoPool {
     /// @notice 添加流动性事件
     /// @param sender 调用 mint 的地址（通常是 Manager 合约）
@@ -63,6 +64,22 @@ interface IUniGoPool {
         int24 indexed tickUpper,
         uint128 amount0,
         uint128 amount1
+    );
+
+    /// @notice 闪电贷事件
+    /// @param sender 调用 flash 的地址
+    /// @param recipient 接收借出 token 的地址
+    /// @param amount0 借出的 token0 数量
+    /// @param amount1 借出的 token1 数量
+    /// @param paid0 实际支付的 token0 手续费
+    /// @param paid1 实际支付的 token1 手续费
+    event Flash(
+        address indexed sender,
+        address indexed recipient,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 paid0,
+        uint256 paid1
     );
 
     /// @notice 初始化池子
@@ -128,4 +145,17 @@ interface IUniGoPool {
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external returns (uint128 amount0, uint128 amount1);
+
+    /// @notice 闪电贷：同一笔交易内借出并归还 token
+    /// @dev 调用者必须实现 uniGoFlashCallback，并在回调内归还本金 + 手续费
+    /// @param recipient 接收借出 token 的地址
+    /// @param amount0 借出的 token0 数量
+    /// @param amount1 借出的 token1 数量
+    /// @param data 回调数据
+    function flash(
+        address recipient,
+        uint256 amount0,
+        uint256 amount1,
+        bytes calldata data
+    ) external;
 }

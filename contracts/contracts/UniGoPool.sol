@@ -34,6 +34,10 @@ import "./lib/Math.sol";
 ///      - Pool 使用回调模式接收 token（而非 approve + transferFrom）
 ///      - mint/swap 完成计算后，通过回调要求调用者转入 token
 ///      - 回调后验证余额增加是否符合预期
+///
+///      【手续费】
+///      - swap 与闪电贷的手续费按当时的活跃流动性均摊，累计进 feeGrowthGlobal
+///      - position 在 mint/burn 时结算应得手续费到 tokensOwed，再通过 collect 提取
 contract UniGoPool is IUniGoPool {
     using Tick for mapping(int24 => Tick.Info);
     using TickBitmap for mapping(int16 => uint256);
@@ -73,6 +77,11 @@ contract UniGoPool is IUniGoPool {
     /// @dev 只有价格区间包含当前价格的 position 的流动性会被计入
     uint128 public liquidity;
 
+    /// @notice token0 的每单位流动性全局累计手续费（Q128.128）
+    uint256 public feeGrowthGlobal0X128;
+    /// @notice token1 的每单位流动性全局累计手续费（Q128.128）
+    uint256 public feeGrowthGlobal1X128;
+
     // ==================== 映射状态 ====================
 
     /// @notice Tick 状态映射
@@ -91,6 +100,7 @@ contract UniGoPool is IUniGoPool {
         uint160 sqrtPriceX96;             // 当前价格
         int24 tick;                       // 当前 tick
         uint128 liquidity;                // 当前活跃流动性
+        uint256 feeGrowthGlobalX128;      // 输入 token 的全局累计手续费
     }
 
     /// @dev swap 单步计算状态
@@ -168,23 +178,8 @@ contract UniGoPool is IUniGoPool {
         require(tickLower >= TickMath.MIN_TICK, "TLM");
         require(tickUpper <= TickMath.MAX_TICK, "TUM");
 
-        // --- 更新 tick 状态 ---
-        // 更新下界 tick（upper=false，穿过时流动性增加）
-        bool flippedLower = ticks.update(tickLower, int128(amount), false);
-        // 更新上界 tick（upper=true，穿过时流动性减少）
-        bool flippedUpper = ticks.update(tickUpper, int128(amount), true);
-
-        // 如果 tick 的初始化状态发生翻转，更新位图
-        if (flippedLower) {
-            tickBitmap.flipTick(tickLower, tickSpacing);
-        }
-        if (flippedUpper) {
-            tickBitmap.flipTick(tickUpper, tickSpacing);
-        }
-
-        // --- 更新 position 状态 ---
-        Position.Info storage position = positions.get(owner, tickLower, tickUpper);
-        position.update(int128(amount));
+        // --- 更新 tick 和 position 状态 ---
+        _updatePosition(owner, tickLower, tickUpper, int128(amount));
 
         // --- 计算需要的 token 数量 ---
         Slot0 memory _slot0 = slot0;
@@ -239,14 +234,17 @@ contract UniGoPool is IUniGoPool {
     /// @inheritdoc IUniGoPool
     /// @dev burn 只更新状态，不转移 token
     ///      用户需要再调用 collect() 来提取 token
+    ///      amount 传 0 可以只结算手续费（不移除流动性）
     function burn(
         int24 tickLower,
         int24 tickUpper,
         uint128 amount
     ) external override lock returns (uint256 amount0, uint256 amount1) {
-        // 更新 position
         Position.Info storage position = positions.get(msg.sender, tickLower, tickUpper);
         require(position.liquidity >= amount, "BL");
+
+        // --- 更新 tick 和 position 状态（amount 为 0 时只结算手续费）---
+        _updatePosition(msg.sender, tickLower, tickUpper, -int128(amount));
 
         // --- 计算可提取的 token 数量（与 mint 反向计算）---
         Slot0 memory _slot0 = slot0;
@@ -277,19 +275,11 @@ contract UniGoPool is IUniGoPool {
             )));
         }
 
-        // --- 更新 tick 状态 ---
-        bool flippedLower = ticks.update(tickLower, -int128(amount), false);
-        bool flippedUpper = ticks.update(tickUpper, -int128(amount), true);
-
-        if (flippedLower) {
-            tickBitmap.flipTick(tickLower, tickSpacing);
+        // 移除的本金记入可领取数量，由 collect 提取
+        if (amount0 > 0 || amount1 > 0) {
+            position.tokensOwed0 += uint128(amount0);
+            position.tokensOwed1 += uint128(amount1);
         }
-        if (flippedUpper) {
-            tickBitmap.flipTick(tickUpper, tickSpacing);
-        }
-
-        // 更新 position
-        position.update(-int128(amount));
 
         emit Burn(msg.sender, tickLower, tickUpper, amount, amount0, amount1);
     }
@@ -297,7 +287,7 @@ contract UniGoPool is IUniGoPool {
     // ==================== 提取手续费 ====================
 
     /// @inheritdoc IUniGoPool
-    /// @dev 简化版 collect，直接提取 burn 后的可用 token
+    /// @dev 只能提取调用者自己 position 的可领取数量（手续费 + burn 后的本金）
     function collect(
         address recipient,
         int24 tickLower,
@@ -305,9 +295,14 @@ contract UniGoPool is IUniGoPool {
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external override lock returns (uint128 amount0, uint128 amount1) {
-        // 简化实现：直接转出请求的数量
-        amount0 = amount0Requested;
-        amount1 = amount1Requested;
+        Position.Info storage position = positions.get(msg.sender, tickLower, tickUpper);
+
+        // 实际提取量不超过可领取数量
+        amount0 = amount0Requested > position.tokensOwed0 ? position.tokensOwed0 : amount0Requested;
+        amount1 = amount1Requested > position.tokensOwed1 ? position.tokensOwed1 : amount1Requested;
+
+        position.tokensOwed0 -= amount0;
+        position.tokensOwed1 -= amount1;
 
         if (amount0 > 0) {
             IERC20(token0).transfer(recipient, amount0);
@@ -357,7 +352,8 @@ contract UniGoPool is IUniGoPool {
             amountCalculated: 0,
             sqrtPriceX96: _slot0.sqrtPriceX96,
             tick: _slot0.tick,
-            liquidity: liquidity
+            liquidity: liquidity,
+            feeGrowthGlobalX128: zeroForOne ? feeGrowthGlobal0X128 : feeGrowthGlobal1X128
         });
 
         // === swap 主循环 ===
@@ -402,10 +398,21 @@ contract UniGoPool is IUniGoPool {
                 state.amountCalculated += int256(step.amountIn + step.feeAmount);
             }
 
-            // 4. 如果到达了 tick 边界，穿过 tick
+            // 4. 手续费按当前活跃流动性均摊，累计到全局手续费
+            if (state.liquidity > 0) {
+                unchecked {
+                    state.feeGrowthGlobalX128 += Math.mulDiv(step.feeAmount, Position.Q128, state.liquidity);
+                }
+            }
+
+            // 5. 如果到达了 tick 边界，穿过 tick
             if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
                 if (step.initialized) {
-                    int128 liquidityNet = ticks.cross(step.tickNext);
+                    int128 liquidityNet = ticks.cross(
+                        step.tickNext,
+                        zeroForOne ? state.feeGrowthGlobalX128 : feeGrowthGlobal0X128,
+                        zeroForOne ? feeGrowthGlobal1X128 : state.feeGrowthGlobalX128
+                    );
                     // 如果是反向穿越（zeroForOne），取反
                     if (zeroForOne) liquidityNet = -liquidityNet;
                     state.liquidity = LiquidityMath.addDelta(state.liquidity, liquidityNet);
@@ -427,6 +434,13 @@ contract UniGoPool is IUniGoPool {
 
         if (liquidity != state.liquidity) {
             liquidity = state.liquidity;
+        }
+
+        // 手续费只收输入 token
+        if (zeroForOne) {
+            feeGrowthGlobal0X128 = state.feeGrowthGlobalX128;
+        } else {
+            feeGrowthGlobal1X128 = state.feeGrowthGlobalX128;
         }
 
         // === 计算最终的 token 数量 ===
@@ -462,7 +476,99 @@ contract UniGoPool is IUniGoPool {
         emit Swap(msg.sender, recipient, amount0, amount1, state.sqrtPriceX96, state.liquidity, state.tick);
     }
 
+    // ==================== 闪电贷 ====================
+
+    /// @inheritdoc IUniGoPool
+    /// @dev flash 流程：
+    ///      1. 按池子费率计算手续费（向上取整）
+    ///      2. 把借出的 token 转给 recipient
+    ///      3. 回调调用者，调用者必须在回调内归还本金 + 手续费
+    ///      4. 验证余额不低于“借出前余额 + 手续费”，否则整笔交易回滚
+    ///      5. 实收手续费按活跃流动性均摊，归 LP 所有
+    function flash(
+        address recipient,
+        uint256 amount0,
+        uint256 amount1,
+        bytes calldata data
+    ) external override lock {
+        uint128 _liquidity = liquidity;
+
+        uint256 fee0 = Math.mulDivRoundingUp(amount0, fee, 1e6);
+        uint256 fee1 = Math.mulDivRoundingUp(amount1, fee, 1e6);
+        uint256 balance0Before = balance0();
+        uint256 balance1Before = balance1();
+
+        if (amount0 > 0) IERC20(token0).transfer(recipient, amount0);
+        if (amount1 > 0) IERC20(token1).transfer(recipient, amount1);
+
+        IUniGoPoolCallbacks(msg.sender).uniGoFlashCallback(fee0, fee1, data);
+
+        uint256 balance0After = balance0();
+        uint256 balance1After = balance1();
+
+        // 验证本金和手续费已归还
+        require(balance0Before + fee0 <= balance0After, "F0");
+        require(balance1Before + fee1 <= balance1After, "F1");
+
+        // 实收手续费（调用者可以多付）
+        uint256 paid0 = balance0After - balance0Before;
+        uint256 paid1 = balance1After - balance1Before;
+
+        // 没有活跃流动性时无人可分，手续费留在池中不计入累计值
+        if (_liquidity > 0) {
+            unchecked {
+                if (paid0 > 0) feeGrowthGlobal0X128 += Math.mulDiv(paid0, Position.Q128, _liquidity);
+                if (paid1 > 0) feeGrowthGlobal1X128 += Math.mulDiv(paid1, Position.Q128, _liquidity);
+            }
+        }
+
+        emit Flash(msg.sender, recipient, amount0, amount1, paid0, paid1);
+    }
+
     // ==================== 内部函数 ====================
+
+    /// @dev 更新 position 两端的 tick，并结算 position 的手续费和流动性
+    function _updatePosition(
+        address owner,
+        int24 tickLower,
+        int24 tickUpper,
+        int128 liquidityDelta
+    ) private {
+        int24 tick = slot0.tick;
+        uint256 _feeGrowthGlobal0X128 = feeGrowthGlobal0X128;
+        uint256 _feeGrowthGlobal1X128 = feeGrowthGlobal1X128;
+
+        bool flippedLower;
+        bool flippedUpper;
+        if (liquidityDelta != 0) {
+            // 下界 tick（upper=false，穿过时流动性增加）
+            flippedLower = ticks.update(
+                tickLower, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, false
+            );
+            // 上界 tick（upper=true，穿过时流动性减少）
+            flippedUpper = ticks.update(
+                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true
+            );
+
+            // 如果 tick 的初始化状态发生翻转，更新位图
+            if (flippedLower) tickBitmap.flipTick(tickLower, tickSpacing);
+            if (flippedUpper) tickBitmap.flipTick(tickUpper, tickSpacing);
+        }
+
+        (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) = ticks.getFeeGrowthInside(
+            tickLower, tickUpper, tick, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128
+        );
+
+        positions.get(owner, tickLower, tickUpper).update(
+            liquidityDelta, feeGrowthInside0X128, feeGrowthInside1X128
+        );
+
+        // 流动性清零的 tick 不再需要保留状态
+        if (liquidityDelta < 0) {
+            if (flippedLower) ticks.clear(tickLower);
+            if (flippedUpper) ticks.clear(tickUpper);
+        }
+    }
 
     /// @notice 获取池子的 token0 余额
     function balance0() private view returns (uint256) {
