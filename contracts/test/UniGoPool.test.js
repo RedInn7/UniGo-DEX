@@ -240,6 +240,122 @@ describe("UniGoPool", function () {
     });
   });
 
+  describe("跨 tick 的手续费分配", function () {
+    const LIQUIDITY = ethers.parseEther("100");
+    const MAX_SQRT_RATIO_MINUS_ONE = BigInt("1461446703485210103287273052203988822378723970341");
+    // 宽区间 A、窄区间 B（流动性相同）、价格始终到不了的区间 C
+    const WIDE = [-600, 600];
+    const NARROW = [-60, 60];
+    const FAR = [600, 1200];
+
+    // 结算并读取某个 position 累计应得的手续费
+    async function feesOf([tickLower, tickUpper]) {
+      await pool.burn(tickLower, tickUpper, 0);
+      const position = await getPosition(tickLower, tickUpper);
+      return [position.tokensOwed0, position.tokensOwed1];
+    }
+
+    async function swapExactIn(zeroForOne, amount) {
+      await manager.swap(
+        await swapParams({
+          zeroForOne,
+          amountSpecified: amount,
+          sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE,
+        })
+      );
+      return (await pool.slot0()).tick;
+    }
+
+    beforeEach(async function () {
+      await addLiquidity(...WIDE, LIQUIDITY);
+      await addLiquidity(...NARROW, LIQUIDITY);
+      await addLiquidity(...FAR, LIQUIDITY);
+    });
+
+    it("同在区间内时按流动性比例均分", async function () {
+      // 0.1 token0 不足以把价格推出窄区间
+      const amountIn = ethers.parseEther("0.1");
+      const tick = await swapExactIn(true, amountIn);
+      expect(tick).to.be.gte(-60);
+
+      const [wide0] = await feesOf(WIDE);
+      const [narrow0] = await feesOf(NARROW);
+      // 两个 position 流动性相同，各得一半
+      expect(wide0).to.be.closeTo(narrow0, 1);
+      expect(wide0 + narrow0).to.be.closeTo((amountIn * 3n) / 1000n, 5);
+    });
+
+    it("价格越过窄区间边界后，窄区间不再分到手续费", async function () {
+      // 第一笔：越过 tick -60，窄区间只分到边界以内那一段的手续费
+      const firstIn = ethers.parseEther("2");
+      const tickAfterFirst = await swapExactIn(true, firstIn);
+      expect(tickAfterFirst).to.be.lt(-60);
+      expect(tickAfterFirst).to.be.gt(-600);
+
+      const [wideFirst] = await feesOf(WIDE);
+      const [narrowFirst] = await feesOf(NARROW);
+      expect(narrowFirst).to.be.gt(0);
+      expect(narrowFirst).to.be.lt(wideFirst);
+      expect(wideFirst + narrowFirst).to.be.closeTo((firstIn * 3n) / 1000n, 5);
+
+      // 第二笔：全程在窄区间之外，手续费全部归宽区间
+      const secondIn = ethers.parseEther("0.2");
+      await swapExactIn(true, secondIn);
+
+      const [wideSecond] = await feesOf(WIDE);
+      const [narrowSecond] = await feesOf(NARROW);
+      expect(narrowSecond).to.equal(narrowFirst);
+      expect(wideSecond - wideFirst).to.be.closeTo((secondIn * 3n) / 1000n, 5);
+    });
+
+    it("token1 -> token0 反向穿回区间后，窄区间重新分到 token1 手续费", async function () {
+      await swapExactIn(true, ethers.parseEther("2"));
+      const [wide0Before, wide1Before] = await feesOf(WIDE);
+      const [narrow0Before, narrow1Before] = await feesOf(NARROW);
+      expect(wide1Before).to.equal(0);
+      expect(narrow1Before).to.equal(0);
+
+      // 反向买回，价格重新进入窄区间
+      const amountIn = ethers.parseEther("2.5");
+      const tick = await swapExactIn(false, amountIn);
+      expect(tick).to.be.gte(-60);
+      expect(tick).to.be.lt(60);
+
+      const [wide0, wide1] = await feesOf(WIDE);
+      const [narrow0, narrow1] = await feesOf(NARROW);
+      // 反向成交只收 token1 手续费，token0 手续费不变
+      expect(wide0).to.equal(wide0Before);
+      expect(narrow0).to.equal(narrow0Before);
+      expect(narrow1).to.be.gt(0);
+      expect(narrow1).to.be.lt(wide1);
+      expect(wide1 + narrow1).to.be.closeTo((amountIn * 3n) / 1000n, 5);
+    });
+
+    it("价格从未进入的区间分不到任何手续费", async function () {
+      await swapExactIn(true, ethers.parseEther("2"));
+      await swapExactIn(false, ethers.parseEther("2.5"));
+
+      const [far0, far1] = await feesOf(FAR);
+      expect(far0).to.equal(0);
+      expect(far1).to.equal(0);
+    });
+
+    it("跨 tick 成交后各 position 仍能全额撤出", async function () {
+      await swapExactIn(true, ethers.parseEther("2"));
+      await swapExactIn(false, ethers.parseEther("2.5"));
+
+      for (const [tickLower, tickUpper] of [WIDE, NARROW, FAR]) {
+        await pool.burn(tickLower, tickUpper, LIQUIDITY);
+        await pool.collect(owner.address, tickLower, tickUpper, ethers.MaxUint256 >> 128n, ethers.MaxUint256 >> 128n);
+      }
+      expect(await pool.liquidity()).to.equal(0);
+      // 池子里只剩舍入零头
+      const poolAddr = await pool.getAddress();
+      expect(await token0.balanceOf(poolAddr)).to.be.lt(100);
+      expect(await token1.balanceOf(poolAddr)).to.be.lt(100);
+    });
+  });
+
   describe("Manager 期限与滑点保护", function () {
     beforeEach(async function () {
       await addLiquidity(-600, 600, ethers.parseEther("100"));
