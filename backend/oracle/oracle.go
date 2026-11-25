@@ -235,6 +235,49 @@ func (o *Oracle) CheckTWAP(pair string, spot, twap float64) TWAPCheck {
 	return check
 }
 
+// ChainlinkCheck 用 Chainlink 喂价校验池内现价的结果
+type ChainlinkCheck struct {
+	Status    string  // ok / deviated / unavailable / none
+	Price     float64 // 喂价（池子口径）
+	Deviation float64 // |现价 - 喂价| / 喂价
+	Detail    string  // 不可用时的原因
+}
+
+// CheckChainlink 用一次喂价读数校验池内现价，并更新三方交叉验证里 Chainlink 这一方
+//
+//   - 喂价有效：记入交叉验证；现价偏离超过 MaxDeviation 返回 deviated
+//   - 喂价不可用：把这个币对的 Chainlink 价格清掉，交叉验证降级为现价 vs TWAP 两方
+//   - 没有配置喂价：什么都不动
+func (o *Oracle) CheckChainlink(pair string, spot float64, reading FeedReading) ChainlinkCheck {
+	check := ChainlinkCheck{Status: reading.Status, Detail: reading.Detail}
+	switch reading.Status {
+	case ChainlinkOK:
+		o.mu.Lock()
+		o.chainlinkPrices[pair] = &PriceData{
+			Price: reading.Price, Source: SourceChainlink, UpdatedAt: time.Unix(int64(reading.UpdatedAt), 0),
+		}
+		o.poolPrices[pair] = &PriceData{Price: spot, Source: SourcePool, UpdatedAt: time.Now()}
+		o.crossValidate(pair)
+		o.mu.Unlock()
+
+		check.Price = reading.Price
+		check.Deviation = math.Abs(spot-reading.Price) / reading.Price
+		if check.Deviation > o.config.MaxDeviation {
+			check.Status = ChainlinkDeviated
+			metrics.OracleChainlinkDeviations.Inc()
+		}
+	case ChainlinkUnavailable:
+		o.mu.Lock()
+		delete(o.chainlinkPrices, pair)
+		o.mu.Unlock()
+		metrics.OracleChainlinkUnavailable.Inc()
+	}
+	return check
+}
+
+// MaxDeviation 现价相对 Chainlink 的最大允许偏离
+func (o *Oracle) MaxDeviation() float64 { return o.config.MaxDeviation }
+
 // PairKey 交易对在预言机里的 key：按池子的 token0/token1 顺序，价格是 token1/token0
 func PairKey(token0, token1 string) string {
 	return token0 + "/" + token1

@@ -23,12 +23,15 @@ var (
 	quoterJSON string
 	//go:embed FlashArbitrage.json
 	flashArbitrageJSON string
+	//go:embed AggregatorV3Interface.json
+	aggregatorJSON string
 
 	Pool           = mustParse(poolJSON)
 	Factory        = mustParse(factoryJSON)
 	Manager        = mustParse(managerJSON)
 	Quoter         = mustParse(quoterJSON)
 	FlashArbitrage = mustParse(flashArbitrageJSON)
+	Aggregator     = mustParse(aggregatorJSON) // Chainlink AggregatorV3Interface
 )
 
 func mustParse(raw string) abi.ABI {

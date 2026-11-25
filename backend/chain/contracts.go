@@ -317,3 +317,48 @@ func EncodeArbitrage(lender, sellPool, buyPool, borrowToken string, amount, minP
 		MinProfit:   minProfit,
 	})
 }
+
+// ===== Chainlink 喂价 =====
+
+// ChainlinkRound 聚合器 latestRoundData() 的返回值，外加读取时的最新区块时间
+type ChainlinkRound struct {
+	RoundID         *big.Int
+	Answer          *big.Int // 价格，按聚合器的 decimals 放大
+	StartedAt       uint64
+	UpdatedAt       uint64 // 该轮价格的更新时间；0 表示这一轮还没完成
+	AnsweredInRound *big.Int
+	BlockTime       uint64 // 最新区块的时间戳，判断喂价是否过期用它而不是本机时钟
+}
+
+// ChainlinkDecimals 读取聚合器的 decimals()
+func (c *Client) ChainlinkDecimals(ctx context.Context, feed string) (uint8, error) {
+	out, err := c.callContract(ctx, feed, &contractabi.Aggregator, "decimals")
+	if err != nil {
+		return 0, err
+	}
+	return out[0].(uint8), nil
+}
+
+// ChainlinkLatestRound 读取聚合器的 latestRoundData()
+func (c *Client) ChainlinkLatestRound(ctx context.Context, feed string) (*ChainlinkRound, error) {
+	out, err := c.callContract(ctx, feed, &contractabi.Aggregator, "latestRoundData")
+	if err != nil {
+		return nil, err
+	}
+	latest, err := c.LatestBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	block, err := c.BlockByNumber(ctx, latest)
+	if err != nil {
+		return nil, err
+	}
+	return &ChainlinkRound{
+		RoundID:         out[0].(*big.Int),
+		Answer:          out[1].(*big.Int),
+		StartedAt:       out[2].(*big.Int).Uint64(),
+		UpdatedAt:       out[3].(*big.Int).Uint64(),
+		AnsweredInRound: out[4].(*big.Int),
+		BlockTime:       uint64(block.Timestamp.Unix()),
+	}, nil
+}
