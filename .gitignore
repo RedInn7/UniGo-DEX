@@ -34,3 +34,7 @@ coverage.json
 # 日志
 *.log
 npm-debug.log*
+
+# 子图生成物
+subgraph/build/
+subgraph/generated/

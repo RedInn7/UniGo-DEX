@@ -1,0 +1,63 @@
+specVersion: 1.0.0
+description: UniGo-DEX 集中流动性 AMM 的链上数据索引（池子、交易、流动性、闪电贷、K 线）
+schema:
+  file: ./schema.graphql
+dataSources:
+  # Factory 是唯一的静态数据源，监听新池创建
+  - kind: ethereum/contract
+    name: Factory
+    # 本地 Hardhat 节点；部署到其他网络时改 network / address / startBlock
+    network: localhost
+    source:
+      # scripts/deploy.js 在本地节点上首个部署的合约地址
+      address: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+      abi: UniGoFactory
+      startBlock: 0
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      file: ./src/factory.ts
+      entities:
+        - Factory
+        - Pool
+      abis:
+        - name: UniGoFactory
+          file: ./abis/UniGoFactory.json
+      eventHandlers:
+        - event: PoolCreated(indexed address,indexed address,indexed uint24,int24,address)
+          handler: handlePoolCreated
+templates:
+  # 每个新池由 Factory 的 handler 动态创建一个 Pool 数据源
+  - kind: ethereum/contract
+    name: Pool
+    network: localhost
+    source:
+      abi: UniGoPool
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      file: ./src/pool.ts
+      entities:
+        - Factory
+        - Pool
+        - Swap
+        - Mint
+        - Burn
+        - Flash
+        - Candle
+      abis:
+        - name: UniGoPool
+          file: ./abis/UniGoPool.json
+      eventHandlers:
+        - event: Initialize(uint160,int24)
+          handler: handleInitialize
+        - event: Swap(indexed address,indexed address,int256,int256,uint160,uint128,int24)
+          handler: handleSwap
+        - event: Mint(address,indexed address,indexed int24,indexed int24,uint128,uint256,uint256)
+          handler: handleMint
+        - event: Burn(indexed address,indexed int24,indexed int24,uint128,uint256,uint256)
+          handler: handleBurn
+        - event: Flash(indexed address,indexed address,uint256,uint256,uint256,uint256)
+          handler: handleFlash

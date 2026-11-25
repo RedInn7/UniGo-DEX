@@ -1,0 +1,149 @@
+# UniGo-DEX 子图数据模型
+# 数量字段均为链上原始整数（未按 token decimals 换算）
+
+"工厂合约，全局统计"
+type Factory @entity(immutable: false) {
+  "工厂合约地址"
+  id: Bytes!
+  "已创建的池子数量"
+  poolCount: BigInt!
+  "所有池子的事件总数（swap / mint / burn / flash）"
+  txCount: BigInt!
+  pools: [Pool!]! @derivedFrom(field: "factory")
+}
+
+"流动性池"
+type Pool @entity(immutable: false) {
+  "池子合约地址"
+  id: Bytes!
+  factory: Factory!
+  token0: Bytes!
+  token1: Bytes!
+  "手续费率（百万分之一）"
+  fee: Int!
+  tickSpacing: Int!
+  "当前平方根价格（Q64.96）"
+  sqrtPriceX96: BigInt!
+  "当前 tick"
+  tick: Int!
+  "当前活跃流动性"
+  liquidity: BigInt!
+  "当前价格：1 个 token0 值多少 token1（由 sqrtPriceX96 计算）"
+  price: BigDecimal!
+  "累计成交量（token0）"
+  volumeToken0: BigInt!
+  "累计成交量（token1）"
+  volumeToken1: BigInt!
+  "累计闪电贷手续费（token0）"
+  flashFeeToken0: BigInt!
+  "累计闪电贷手续费（token1）"
+  flashFeeToken1: BigInt!
+  "事件总数（swap / mint / burn / flash）"
+  txCount: BigInt!
+  createdAtTimestamp: BigInt!
+  createdAtBlockNumber: BigInt!
+  swaps: [Swap!]! @derivedFrom(field: "pool")
+  mints: [Mint!]! @derivedFrom(field: "pool")
+  burns: [Burn!]! @derivedFrom(field: "pool")
+  flashes: [Flash!]! @derivedFrom(field: "pool")
+  candles: [Candle!]! @derivedFrom(field: "pool")
+}
+
+"代币交换"
+type Swap @entity(immutable: true) {
+  "交易哈希 + 日志序号"
+  id: Bytes!
+  pool: Pool!
+  sender: Bytes!
+  recipient: Bytes!
+  "token0 变化量（负数表示池子转出）"
+  amount0: BigInt!
+  "token1 变化量（负数表示池子转出）"
+  amount1: BigInt!
+  "成交后的平方根价格"
+  sqrtPriceX96: BigInt!
+  "成交后的活跃流动性"
+  liquidity: BigInt!
+  "成交后的 tick"
+  tick: Int!
+  "成交后的价格（token1 / token0）"
+  price: BigDecimal!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+"添加流动性"
+type Mint @entity(immutable: true) {
+  id: Bytes!
+  pool: Pool!
+  sender: Bytes!
+  owner: Bytes!
+  tickLower: Int!
+  tickUpper: Int!
+  "流动性数量"
+  amount: BigInt!
+  amount0: BigInt!
+  amount1: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+"移除流动性"
+type Burn @entity(immutable: true) {
+  id: Bytes!
+  pool: Pool!
+  owner: Bytes!
+  tickLower: Int!
+  tickUpper: Int!
+  "流动性数量"
+  amount: BigInt!
+  amount0: BigInt!
+  amount1: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+"闪电贷"
+type Flash @entity(immutable: true) {
+  id: Bytes!
+  pool: Pool!
+  sender: Bytes!
+  recipient: Bytes!
+  "借出的 token0 数量"
+  amount0: BigInt!
+  "借出的 token1 数量"
+  amount1: BigInt!
+  "实付的 token0 手续费"
+  paid0: BigInt!
+  "实付的 token1 手续费"
+  paid1: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+"K 线：按 池子 + 周期 + 起始时间 唯一"
+type Candle @entity(immutable: false) {
+  "{池子地址}-{周期}-{起始时间}"
+  id: ID!
+  pool: Pool!
+  "周期：1m / 5m / 1h / 1d"
+  interval: String!
+  "周期起始时间（Unix 秒）"
+  periodStart: Int!
+  "开盘价：周期内第一笔成交前的价格"
+  open: BigDecimal!
+  high: BigDecimal!
+  low: BigDecimal!
+  "收盘价：周期内最后一笔成交后的价格"
+  close: BigDecimal!
+  "周期内成交量（token0）"
+  volumeToken0: BigInt!
+  "周期内成交量（token1）"
+  volumeToken1: BigInt!
+  "周期内成交笔数"
+  txCount: BigInt!
+}

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.20;
 
+import "./interfaces/IUniGoFactory.sol";
 import "./interfaces/IUniGoPool.sol";
 import "./interfaces/IUniGoPoolCallbacks.sol";
+import "./lib/TickMath.sol";
 
 /// @title UniGoQuoter
 /// @notice 报价合约，模拟 swap 返回预期输出而不实际执行
@@ -23,6 +25,14 @@ contract UniGoQuoter is IUniGoPoolCallbacks {
     /// @notice 自定义 revert 错误，用于携带报价结果
     error QuoteResult(int256 amount0Delta, int256 amount1Delta);
 
+    /// @notice 工厂合约地址，多跳报价时用于查找 Pool
+    address public immutable factory;
+
+    /// @param factory_ 工厂合约地址
+    constructor(address factory_) {
+        factory = factory_;
+    }
+
     /// @notice 报价参数
     struct QuoteParams {
         address pool;              // Pool 合约地址
@@ -37,7 +47,7 @@ contract UniGoQuoter is IUniGoPoolCallbacks {
     /// @return amount0Delta 预期的 token0 变化量
     /// @return amount1Delta 预期的 token1 变化量
     function quote(QuoteParams memory params)
-        external
+        public
         returns (int256 amount0Delta, int256 amount1Delta)
     {
         try IUniGoPool(params.pool).swap(
@@ -52,8 +62,51 @@ contract UniGoQuoter is IUniGoPoolCallbacks {
         }
     }
 
+    /// @notice 获取多跳精确输入的报价
+    /// @dev 路径编码与 Manager.exactInput 相同：token + fee + token + ...
+    ///      逐跳报价，上一跳的输出作为下一跳的输入。
+    ///      每一跳的模拟都会回滚，所以路径重复经过同一个 Pool 时，后一次看不到前一次的价格影响
+    /// @param path 兑换路径
+    /// @param amountIn 输入 token 数量
+    /// @return amountOut 预期的最终输出数量
+    function quoteExactInput(bytes calldata path, uint256 amountIn)
+        external
+        returns (uint256 amountOut)
+    {
+        require(path.length >= 43 && (path.length - 20) % 23 == 0, "PATH");
+
+        amountOut = amountIn;
+        while (true) {
+            address tokenIn = address(bytes20(path[:20]));
+            address tokenOut = address(bytes20(path[23:43]));
+            address pool = IUniGoFactory(factory).getPool(tokenIn, tokenOut, uint24(bytes3(path[20:23])));
+            require(pool != address(0), "POOL");
+            require(amountOut <= uint256(type(int256).max), "AS");
+
+            bool zeroForOne = tokenIn < tokenOut;
+            (int256 amount0, int256 amount1) = quote(QuoteParams({
+                pool: pool,
+                zeroForOne: zeroForOne,
+                amountSpecified: int256(amountOut),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1
+            }));
+
+            // 与 Manager 保持一致：流动性不足、输入吃不完时报价失败
+            require(uint256(zeroForOne ? amount0 : amount1) == amountOut, "PF");
+            amountOut = uint256(-(zeroForOne ? amount1 : amount0));
+
+            if (path.length == 43) break;
+            path = path[23:];
+        }
+    }
+
     /// @dev mint 回调 — Quoter 不需要实现，直接 revert
     function uniGoMintCallback(uint256, uint256, bytes calldata) external pure override {
+        revert("NOT_SUPPORTED");
+    }
+
+    /// @dev flash 回调 — Quoter 不需要实现，直接 revert
+    function uniGoFlashCallback(uint256, uint256, bytes calldata) external pure override {
         revert("NOT_SUPPORTED");
     }
 
