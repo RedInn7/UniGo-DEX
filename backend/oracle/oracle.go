@@ -5,6 +5,10 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"unigo-dex/indexer"
+	umath "unigo-dex/math"
+	"unigo-dex/metrics"
 )
 
 // oracle.go — 价格预言机验证层
@@ -22,9 +26,11 @@ import (
 //      - 不仅读取 price，还校验 updatedAt
 //      - 若 CurrentTime - updatedAt > StaleThreshold，判定价格失效
 //
-//   2. 交叉验证
-//      - 对比 Chainlink 价格与池内价格
-//      - 偏离超过 MaxDeviation 触发保护模式
+//   2. 三方交叉验证：池内现价 / 池内 TWAP / Chainlink
+//      - 现价 vs Chainlink：偏离超过 MaxDeviation 触发保护模式
+//      - TWAP vs Chainlink：TWAP 也偏了，说明不是瞬时波动，同样触发保护模式
+//      - 现价 vs TWAP：现价能在一个区块内被闪电贷拉偏，TWAP 要整个窗口都顶住才会动，
+//        两者偏离超过 MaxTWAPDeviation 视为疑似单区块操纵，交易前检查直接拒绝
 //
 //   3. 保护模式（Fail-safe）
 //      - 暂停自动路由
@@ -38,6 +44,7 @@ const (
 	SourceChainlink PriceSource = iota
 	SourcePool
 	SourceCEX
+	SourceTWAP
 )
 
 // PriceData 价格数据
@@ -58,6 +65,9 @@ type OracleConfig struct {
 	// 池内价格与 Chainlink 偏离超过此值触发保护模式
 	MaxDeviation float64
 
+	// MaxTWAPDeviation 现价相对 TWAP 的最大偏离，超过视为疑似单区块操纵
+	MaxTWAPDeviation float64
+
 	// ProtectionCooldown 保护模式冷却时间
 	// 触发保护模式后，至少持续此时间
 	ProtectionCooldown time.Duration
@@ -68,6 +78,7 @@ func DefaultOracleConfig() OracleConfig {
 	return OracleConfig{
 		StaleThreshold:     1 * time.Hour,   // Chainlink 1 小时未更新视为过期
 		MaxDeviation:       0.02,             // 2% 偏离触发保护
+		MaxTWAPDeviation:   0.05,             // 现价偏离 TWAP 5% 视为疑似操纵
 		ProtectionCooldown: 5 * time.Minute,  // 保护模式至少 5 分钟
 	}
 }
@@ -87,6 +98,7 @@ type Oracle struct {
 	// 各来源的最新价格（token pair -> PriceData）
 	chainlinkPrices map[string]*PriceData
 	poolPrices      map[string]*PriceData
+	twapPrices      map[string]*PriceData
 
 	// 保护模式状态
 	protectionStatus map[string]*ProtectionStatus
@@ -100,6 +112,7 @@ func NewOracle(config OracleConfig) *Oracle {
 		config:           config,
 		chainlinkPrices:  make(map[string]*PriceData),
 		poolPrices:       make(map[string]*PriceData),
+		twapPrices:       make(map[string]*PriceData),
 		protectionStatus: make(map[string]*ProtectionStatus),
 	}
 }
@@ -143,38 +156,113 @@ func (o *Oracle) UpdatePoolPrice(pair string, price float64) {
 	o.crossValidate(pair)
 }
 
-// crossValidate 交叉验证池内价格与 Chainlink 价格
+// crossValidate 三方交叉验证：池内现价 / TWAP / Chainlink
 //
-// 当偏离超过 MaxDeviation 时：
-//   - 可能是闪电贷攻击导致池内价格被操纵
-//   - 可能是 Chainlink 更新滞后
-//   - 无论哪种情况，都应该触发保护模式
+// 任意一组偏离超过阈值就进入保护模式，全部正常才尝试退出（受冷却时间约束）。
+// 缺少的价格源不参与比较。
 func (o *Oracle) crossValidate(pair string) {
-	chainlink, hasChainlink := o.chainlinkPrices[pair]
-	pool, hasPool := o.poolPrices[pair]
-
-	if !hasChainlink || !hasPool {
-		return
+	chainlink := o.chainlinkPrices[pair]
+	pool := o.poolPrices[pair]
+	twap := o.twapPrices[pair]
+	stale := chainlink != nil && chainlink.IsStale
+	if stale {
+		// 过期的 Chainlink 价格不参与比较；过期本身已触发保护，在它更新之前不解除
+		chainlink = nil
 	}
 
-	// 跳过过期的 Chainlink 价格
-	if chainlink.IsStale {
-		return
-	}
+	deviation := func(a, b *PriceData) float64 { return math.Abs(a.Price-b.Price) / b.Price }
 
-	// 计算偏离度
-	deviation := math.Abs(pool.Price-chainlink.Price) / chainlink.Price
-
-	if deviation > o.config.MaxDeviation {
-		o.activateProtection(pair, fmt.Sprintf(
+	var reason string
+	switch {
+	case pool != nil && chainlink != nil && deviation(pool, chainlink) > o.config.MaxDeviation:
+		reason = fmt.Sprintf(
 			"池内价格与 Chainlink 偏离 %.2f%%（阈值 %.2f%%）: 池内=%.6f, Chainlink=%.6f",
-			deviation*100, o.config.MaxDeviation*100,
-			pool.Price, chainlink.Price))
-	} else {
-		// 偏离在正常范围内，检查是否可以解除保护
+			deviation(pool, chainlink)*100, o.config.MaxDeviation*100, pool.Price, chainlink.Price)
+	case twap != nil && chainlink != nil && deviation(twap, chainlink) > o.config.MaxDeviation:
+		reason = fmt.Sprintf(
+			"池内 TWAP 与 Chainlink 偏离 %.2f%%（阈值 %.2f%%）: TWAP=%.6f, Chainlink=%.6f",
+			deviation(twap, chainlink)*100, o.config.MaxDeviation*100, twap.Price, chainlink.Price)
+	case pool != nil && twap != nil && deviation(pool, twap) > o.config.MaxTWAPDeviation:
+		reason = fmt.Sprintf(
+			"池内现价与 TWAP 偏离 %.2f%%（阈值 %.2f%%），疑似单区块价格操纵: 现价=%.6f, TWAP=%.6f",
+			deviation(pool, twap)*100, o.config.MaxTWAPDeviation*100, pool.Price, twap.Price)
+	}
+
+	if reason != "" {
+		o.activateProtection(pair, reason)
+	} else if !stale && pool != nil && (chainlink != nil || twap != nil) {
 		o.tryDeactivateProtection(pair)
 	}
 }
+
+// TWAP 校验结果
+const (
+	TWAPOK          = "ok"          // 现价与 TWAP 一致
+	TWAPDeviated    = "deviated"    // 现价偏离 TWAP 过大，疑似被操纵
+	TWAPUnavailable = "unavailable" // 取不到 TWAP（观测不足或节点不可用），无法判断
+)
+
+// TWAPCheck 用 TWAP 校验现价的结果
+type TWAPCheck struct {
+	Status    string  `json:"status"`
+	Spot      float64 `json:"spot"`
+	TWAP      float64 `json:"twap,omitempty"`
+	Deviation float64 `json:"deviation"` // |现价 - TWAP| / TWAP
+}
+
+// CheckTWAP 用 TWAP 校验池内现价是否可能被单区块操纵，并把两个价格纳入三方交叉验证
+//
+// twap <= 0 表示取不到 TWAP：此时无法判断，返回 unavailable，由调用方提示用户而不是放行为"正常"。
+func (o *Oracle) CheckTWAP(pair string, spot, twap float64) TWAPCheck {
+	metrics.OracleTWAPChecks.Inc()
+	if twap <= 0 {
+		metrics.OracleTWAPUnavailable.Inc()
+		return TWAPCheck{Status: TWAPUnavailable, Spot: spot}
+	}
+
+	o.mu.Lock()
+	now := time.Now()
+	o.poolPrices[pair] = &PriceData{Price: spot, Source: SourcePool, UpdatedAt: now}
+	o.twapPrices[pair] = &PriceData{Price: twap, Source: SourceTWAP, UpdatedAt: now}
+	o.crossValidate(pair)
+	o.mu.Unlock()
+
+	check := TWAPCheck{Status: TWAPOK, Spot: spot, TWAP: twap, Deviation: math.Abs(spot-twap) / twap}
+	if check.Deviation > o.config.MaxTWAPDeviation {
+		check.Status = TWAPDeviated
+		metrics.OracleTWAPDeviations.Inc()
+	}
+	return check
+}
+
+// PairKey 交易对在预言机里的 key：按池子的 token0/token1 顺序，价格是 token1/token0
+func PairKey(token0, token1 string) string {
+	return token0 + "/" + token1
+}
+
+// poolPriceFeed 把索引器的 Swap 事件喂给预言机做交叉验证
+type poolPriceFeed struct {
+	oracle *Oracle
+	state  *indexer.PoolStateManager
+}
+
+// PoolPriceFeed 返回一个订阅 Swap 事件流的监听器：每笔成交后更新对应交易对的池内价格
+func (o *Oracle) PoolPriceFeed(state *indexer.PoolStateManager) indexer.SwapListener {
+	return &poolPriceFeed{oracle: o, state: state}
+}
+
+func (f *poolPriceFeed) OnSwap(e *indexer.SwapEvent) {
+	pool, ok := f.state.GetPool(e.PoolAddress)
+	if !ok {
+		return
+	}
+	if price := umath.SqrtPriceX96ToPrice(e.SqrtPriceX96); price > 0 {
+		f.oracle.UpdatePoolPrice(PairKey(pool.Token0, pool.Token1), price)
+	}
+}
+
+// OnReorg 价格是瞬时值，回滚后的成交会重新推送，不需要额外处理
+func (f *poolPriceFeed) OnReorg(uint64) {}
 
 // activateProtection 激活保护模式
 func (o *Oracle) activateProtection(pair string, reason string) {
@@ -260,6 +348,9 @@ func (o *Oracle) GetPriceInfo(pair string) map[string]*PriceData {
 	}
 	if p, ok := o.poolPrices[pair]; ok {
 		result["pool"] = p
+	}
+	if p, ok := o.twapPrices[pair]; ok {
+		result["twap"] = p
 	}
 	return result
 }
