@@ -111,7 +111,7 @@ describe("UniGoPool", function () {
 
     // 部署 Manager
     const Manager = await ethers.getContractFactory("UniGoManager");
-    manager = await Manager.deploy();
+    manager = await Manager.deploy(await factory.getAddress());
     await manager.waitForDeployment();
 
     // 给用户铸造测试代币并 approve Manager
@@ -303,8 +303,8 @@ describe("UniGoPool", function () {
   describe("Manager 回调权限", function () {
     it("直接调用回调不能划走已授权用户的 token", async function () {
       const data = ethers.AbiCoder.defaultAbiCoder().encode(
-        ["address", "address"],
-        [await token0.getAddress(), await token1.getAddress()]
+        ["address", "address", "uint24", "address"],
+        [await token0.getAddress(), await token1.getAddress(), 3000, owner.address]
       );
       // owner 已 approve Manager，user 试图借回调把 owner 的 token 转给自己
       await expect(manager.connect(user).uniGoSwapCallback(100, 0, data)).to.be.revertedWith("CB");
