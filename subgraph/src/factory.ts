@@ -20,7 +20,7 @@ export function handlePoolCreated(event: PoolCreated): void {
   pool.token1 = event.params.token1;
   pool.fee = event.params.fee;
   pool.tickSpacing = event.params.tickSpacing;
-  // 池子创建时尚未初始化，价格在首次 mint / swap 时写入
+  // 池子创建时尚未初始化，价格由 Initialize 事件写入
   pool.sqrtPriceX96 = BigInt.zero();
   pool.tick = 0;
   pool.liquidity = BigInt.zero();

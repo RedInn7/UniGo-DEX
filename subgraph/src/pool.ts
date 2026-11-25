@@ -2,6 +2,7 @@ import { Address, BigDecimal, BigInt, Bytes, ethereum } from "@graphprotocol/gra
 import {
   Burn as BurnEvent,
   Flash as FlashEvent,
+  Initialize as InitializeEvent,
   Mint as MintEvent,
   Swap as SwapEvent,
   UniGoPool,
@@ -38,7 +39,7 @@ function countTx(pool: Pool): void {
 }
 
 // 从链上读取池子的最新价格和活跃流动性
-// Mint / Burn 事件本身不带价格，且合约没有初始化事件，所以直接读合约状态
+// Mint / Burn 事件本身不带价格和活跃流动性，所以直接读合约状态
 function refreshPoolState(pool: Pool, address: Address): void {
   const contract = UniGoPool.bind(address);
   const slot0 = contract.try_slot0();
@@ -89,6 +90,17 @@ function updateCandles(
     candle.txCount = candle.txCount.plus(ONE);
     candle.save();
   }
+}
+
+// 池子初始化：写入初始价格
+export function handleInitialize(event: InitializeEvent): void {
+  const pool = Pool.load(event.address);
+  if (pool == null) return;
+
+  pool.sqrtPriceX96 = event.params.sqrtPriceX96;
+  pool.tick = event.params.tick;
+  pool.price = sqrtPriceX96ToPrice(event.params.sqrtPriceX96);
+  pool.save();
 }
 
 export function handleSwap(event: SwapEvent): void {
