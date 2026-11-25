@@ -13,7 +13,8 @@ func q96(mul int64) *big.Int { return new(big.Int).Lsh(big.NewInt(mul), 96) }
 func addPool(m *indexer.PoolStateManager, addr, token0, token1 string) {
 	liquidity, _ := new(big.Int).SetString("1000000000000000000000000", 10) // 1e24
 	p := indexer.NewPoolState(addr, token0, token1, 3000, 60)
-	p.ApplySwap(&indexer.SwapEvent{SqrtPriceX96: q96(1), Liquidity: liquidity, Tick: 0})
+	p.ApplyInitialize(&indexer.InitializeEvent{SqrtPriceX96: q96(1), Tick: 0})
+	p.ApplyMint(&indexer.MintEvent{TickLower: -6000, TickUpper: 6000, Amount: liquidity})
 	m.AddPool(p)
 }
 
@@ -46,16 +47,12 @@ func TestRouteOutputFollowsPoolPrice(t *testing.T) {
 	}
 }
 
-func TestRouteZeroOutputWithoutPrice(t *testing.T) {
+func TestNoRouteWithoutPrice(t *testing.T) {
 	state := indexer.NewPoolStateManager()
 	state.AddPool(indexer.NewPoolState("0xp1", "0xa", "0xb", 3000, 60)) // 没有价格和流动性
 	r := NewRouter(DefaultRouterConfig(), state)
 
-	route, err := r.FindBestRoute(context.Background(), "0xa", "0xb", big.NewInt(1e18))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if route.AmountOut.Sign() != 0 {
-		t.Fatalf("amountOut = %s, want 0", route.AmountOut)
+	if _, err := r.FindBestRoute(context.Background(), "0xa", "0xb", big.NewInt(1e18)); err == nil {
+		t.Fatal("pool without price should not be routable")
 	}
 }

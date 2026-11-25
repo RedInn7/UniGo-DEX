@@ -159,7 +159,10 @@ func TestComputeSwapStepPartial(t *testing.T) {
 		if !zeroForOne {
 			target, _ = GetSqrtRatioAtTick(10)
 		}
-		next, in, out, fee := ComputeSwapStep(Q96, target, liquidity, amountIn, Fee3000)
+		next, in, out, fee, err := ComputeSwapStep(Q96, target, liquidity, amountIn, Fee3000)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if next.Cmp(target) == 0 || next.Cmp(Q96) == 0 {
 			t.Fatalf("zeroForOne=%v: price should stop between current and target, got %s", zeroForOne, next)

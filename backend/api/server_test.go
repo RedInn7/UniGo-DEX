@@ -36,7 +36,8 @@ func newTestServer() *testServer {
 	state := indexer.NewPoolStateManager()
 	liquidity, _ := new(big.Int).SetString("1000000000000000000000000", 10)
 	pool := indexer.NewPoolState(testPool, tokenA, tokenB, 3000, 60)
-	pool.ApplySwap(&indexer.SwapEvent{SqrtPriceX96: new(big.Int).Lsh(big.NewInt(1), 96), Liquidity: liquidity})
+	pool.ApplyInitialize(&indexer.InitializeEvent{SqrtPriceX96: new(big.Int).Lsh(big.NewInt(1), 96)})
+	pool.ApplyMint(&indexer.MintEvent{TickLower: -6000, TickUpper: 6000, Amount: liquidity})
 	state.AddPool(pool)
 
 	klines := kline.NewAggregator(kline.DefaultConfig())
@@ -150,7 +151,7 @@ func TestSwapPreTradeProtection(t *testing.T) {
 		code int
 		msg  string
 	}{
-		"价格冲击过大":       {body("500000000000000000000000", deadline, ""), http.StatusBadRequest, "price impact too high"},
+		"价格冲击过大":       {body("100000000000000000000000", deadline, ""), http.StatusBadRequest, "price impact too high"},
 		"deadline 已过期": {body("1000000000000000000", time.Now().Add(-time.Minute).Unix(), ""), http.StatusBadRequest, "deadline expired"},
 		"deadline 过长":  {body("1000000000000000000", time.Now().Add(24*time.Hour).Unix(), ""), http.StatusBadRequest, "deadline too far"},
 		"没有路由":         {strings.Replace(body("1000", deadline, ""), tokenB, "0xcccc", 1), http.StatusBadRequest, "route search failed"},
