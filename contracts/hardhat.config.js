@@ -12,6 +12,10 @@ module.exports = {
       viaIR: true,
     },
   },
+  // gas 报告默认关闭，REPORT_GAS=1 npx hardhat test 时开启
+  gasReporter: {
+    enabled: !!process.env.REPORT_GAS,
+  },
   networks: {
     hardhat: {
       // 本地 Hardhat 网络配置
