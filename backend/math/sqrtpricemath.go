@@ -16,12 +16,12 @@ import (
 //   - 路由引擎评估不同路径的预期产出
 //   - 报价服务快速返回 quote 而无需调用链上合约
 
-// GetAmount0Delta 计算在价格区间 [sqrtPriceA, sqrtPriceB] 内所需的 token0 数量
+// nativeGetAmount0Delta 计算在价格区间 [sqrtPriceA, sqrtPriceB] 内所需的 token0 数量
 //
 // 公式：amount0 = L × (sqrtPriceB - sqrtPriceA) / (sqrtPriceA × sqrtPriceB)
 //
 // 参数均为 Q64.96 格式的 big.Int
-func GetAmount0Delta(sqrtPriceA, sqrtPriceB, liquidity *big.Int, roundUp bool) *big.Int {
+func nativeGetAmount0Delta(sqrtPriceA, sqrtPriceB, liquidity *big.Int, roundUp bool) *big.Int {
 	// 确保 a < b
 	if sqrtPriceA.Cmp(sqrtPriceB) > 0 {
 		sqrtPriceA, sqrtPriceB = sqrtPriceB, sqrtPriceA
@@ -44,10 +44,10 @@ func GetAmount0Delta(sqrtPriceA, sqrtPriceB, liquidity *big.Int, roundUp bool) *
 	return new(big.Int).Div(inner, sqrtPriceA)
 }
 
-// GetAmount1Delta 计算在价格区间内所需的 token1 数量
+// nativeGetAmount1Delta 计算在价格区间内所需的 token1 数量
 //
 // 公式：amount1 = L × (sqrtPriceB - sqrtPriceA) / Q96
-func GetAmount1Delta(sqrtPriceA, sqrtPriceB, liquidity *big.Int, roundUp bool) *big.Int {
+func nativeGetAmount1Delta(sqrtPriceA, sqrtPriceB, liquidity *big.Int, roundUp bool) *big.Int {
 	if sqrtPriceA.Cmp(sqrtPriceB) > 0 {
 		sqrtPriceA, sqrtPriceB = sqrtPriceB, sqrtPriceA
 	}
@@ -147,8 +147,8 @@ func nextSqrtPriceFromAmount1RoundingDown(sqrtPrice, liquidity, amount *big.Int,
 	return quotient.Sub(sqrtPrice, quotient), nil
 }
 
-// GetNextSqrtPriceFromInput 投入 amountIn 后的新价格（对应 SqrtPriceMath.getNextSqrtPriceFromInput）
-func GetNextSqrtPriceFromInput(sqrtPrice, liquidity, amountIn *big.Int, zeroForOne bool) (*big.Int, error) {
+// nativeGetNextSqrtPriceFromInput 投入 amountIn 后的新价格（对应 SqrtPriceMath.getNextSqrtPriceFromInput）
+func nativeGetNextSqrtPriceFromInput(sqrtPrice, liquidity, amountIn *big.Int, zeroForOne bool) (*big.Int, error) {
 	if sqrtPrice.Sign() <= 0 || liquidity.Sign() <= 0 {
 		return nil, ErrSwapMath
 	}
@@ -158,8 +158,8 @@ func GetNextSqrtPriceFromInput(sqrtPrice, liquidity, amountIn *big.Int, zeroForO
 	return nextSqrtPriceFromAmount1RoundingDown(sqrtPrice, liquidity, amountIn, true)
 }
 
-// GetNextSqrtPriceFromOutput 取出 amountOut 后的新价格（对应 SqrtPriceMath.getNextSqrtPriceFromOutput）
-func GetNextSqrtPriceFromOutput(sqrtPrice, liquidity, amountOut *big.Int, zeroForOne bool) (*big.Int, error) {
+// nativeGetNextSqrtPriceFromOutput 取出 amountOut 后的新价格（对应 SqrtPriceMath.getNextSqrtPriceFromOutput）
+func nativeGetNextSqrtPriceFromOutput(sqrtPrice, liquidity, amountOut *big.Int, zeroForOne bool) (*big.Int, error) {
 	if sqrtPrice.Sign() <= 0 || liquidity.Sign() <= 0 {
 		return nil, ErrSwapMath
 	}
@@ -169,7 +169,7 @@ func GetNextSqrtPriceFromOutput(sqrtPrice, liquidity, amountOut *big.Int, zeroFo
 	return nextSqrtPriceFromAmount0RoundingUp(sqrtPrice, liquidity, amountOut, false)
 }
 
-// ComputeSwapStep 单步 swap 计算，逐行对应 Solidity 的 SwapMath.computeSwapStep
+// nativeComputeSwapStep 单步 swap 计算，逐行对应 Solidity 的 SwapMath.computeSwapStep
 //
 // 在一个流动性不变的价格区间内，从 sqrtPriceCurrent 朝 sqrtPriceTarget 交换：
 //   - amountRemaining > 0：精确输入，剩余待投入的数量（含手续费）
@@ -177,7 +177,7 @@ func GetNextSqrtPriceFromOutput(sqrtPrice, liquidity, amountOut *big.Int, zeroFo
 //
 // 返回值：(sqrtPriceNext, amountIn, amountOut, feeAmount)。
 // 取整方向与链上完全相同：输入向上取整、输出向下取整，池子永远不吃亏。
-func ComputeSwapStep(
+func nativeComputeSwapStep(
 	sqrtPriceCurrent, sqrtPriceTarget *big.Int,
 	liquidity *big.Int,
 	amountRemaining *big.Int,
@@ -196,27 +196,27 @@ func ComputeSwapStep(
 		amountRemainingLessFee := MulDiv(absRemaining, feeComplement, million)
 		// 走到目标价格需要的输入
 		if zeroForOne {
-			amountIn = GetAmount0Delta(sqrtPriceTarget, sqrtPriceCurrent, liquidity, true)
+			amountIn = nativeGetAmount0Delta(sqrtPriceTarget, sqrtPriceCurrent, liquidity, true)
 		} else {
-			amountIn = GetAmount1Delta(sqrtPriceCurrent, sqrtPriceTarget, liquidity, true)
+			amountIn = nativeGetAmount1Delta(sqrtPriceCurrent, sqrtPriceTarget, liquidity, true)
 		}
 		if amountRemainingLessFee.Cmp(amountIn) >= 0 {
 			sqrtPriceNext = new(big.Int).Set(sqrtPriceTarget)
 		} else {
 			// 输入不够走到目标价格：算出实际能推到的价格
-			sqrtPriceNext, err = GetNextSqrtPriceFromInput(sqrtPriceCurrent, liquidity, amountRemainingLessFee, zeroForOne)
+			sqrtPriceNext, err = nativeGetNextSqrtPriceFromInput(sqrtPriceCurrent, liquidity, amountRemainingLessFee, zeroForOne)
 		}
 	} else {
 		// 走到目标价格能取出的输出
 		if zeroForOne {
-			amountOut = GetAmount1Delta(sqrtPriceTarget, sqrtPriceCurrent, liquidity, false)
+			amountOut = nativeGetAmount1Delta(sqrtPriceTarget, sqrtPriceCurrent, liquidity, false)
 		} else {
-			amountOut = GetAmount0Delta(sqrtPriceCurrent, sqrtPriceTarget, liquidity, false)
+			amountOut = nativeGetAmount0Delta(sqrtPriceCurrent, sqrtPriceTarget, liquidity, false)
 		}
 		if absRemaining.Cmp(amountOut) >= 0 {
 			sqrtPriceNext = new(big.Int).Set(sqrtPriceTarget)
 		} else {
-			sqrtPriceNext, err = GetNextSqrtPriceFromOutput(sqrtPriceCurrent, liquidity, absRemaining, zeroForOne)
+			sqrtPriceNext, err = nativeGetNextSqrtPriceFromOutput(sqrtPriceCurrent, liquidity, absRemaining, zeroForOne)
 		}
 	}
 	if err != nil {
@@ -227,17 +227,17 @@ func ComputeSwapStep(
 	reachedTarget := sqrtPriceTarget.Cmp(sqrtPriceNext) == 0
 	if zeroForOne {
 		if !(reachedTarget && exactIn) {
-			amountIn = GetAmount0Delta(sqrtPriceNext, sqrtPriceCurrent, liquidity, true)
+			amountIn = nativeGetAmount0Delta(sqrtPriceNext, sqrtPriceCurrent, liquidity, true)
 		}
 		if !(reachedTarget && !exactIn) {
-			amountOut = GetAmount1Delta(sqrtPriceNext, sqrtPriceCurrent, liquidity, false)
+			amountOut = nativeGetAmount1Delta(sqrtPriceNext, sqrtPriceCurrent, liquidity, false)
 		}
 	} else {
 		if !(reachedTarget && exactIn) {
-			amountIn = GetAmount1Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, true)
+			amountIn = nativeGetAmount1Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, true)
 		}
 		if !(reachedTarget && !exactIn) {
-			amountOut = GetAmount0Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, false)
+			amountOut = nativeGetAmount0Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, false)
 		}
 	}
 

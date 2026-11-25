@@ -20,6 +20,7 @@ import (
 	"unigo-dex/indexer"
 	"unigo-dex/kline"
 	"unigo-dex/logging"
+	unimath "unigo-dex/math"
 	"unigo-dex/mev"
 	"unigo-dex/oracle"
 	"unigo-dex/router"
@@ -67,6 +68,9 @@ func main() {
 	defer cancel()
 
 	// === 1. 初始化 PoolStateManager ===
+	// 数学库实现由 MATH_IMPL 选择：native（自己写的）或 oss（开源 SDK）
+	slog.Info("数学库实现", "impl", unimath.Active())
+
 	slog.Info("初始化池子状态管理器")
 	stateManager := indexer.NewPoolStateManager()
 
