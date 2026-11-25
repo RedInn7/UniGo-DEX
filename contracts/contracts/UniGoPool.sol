@@ -516,6 +516,7 @@ contract UniGoPool is IUniGoPool {
 
     /// @inheritdoc IUniGoPool
     /// @dev flash 流程：
+    ///      0. 要求当前有活跃流动性（否则手续费没有 LP 可分）
     ///      1. 按池子费率计算手续费（向上取整）
     ///      2. 把借出的 token 转给 recipient
     ///      3. 回调调用者，调用者必须在回调内归还本金 + 手续费
@@ -528,6 +529,8 @@ contract UniGoPool is IUniGoPool {
         bytes calldata data
     ) external override lock {
         uint128 _liquidity = liquidity;
+        // 没有活跃流动性时手续费无人可分，会永久锁在池子里，直接拒绝
+        require(_liquidity > 0, "L");
 
         uint256 fee0 = Math.mulDivRoundingUp(amount0, fee, 1e6);
         uint256 fee1 = Math.mulDivRoundingUp(amount1, fee, 1e6);
@@ -550,12 +553,9 @@ contract UniGoPool is IUniGoPool {
         uint256 paid0 = balance0After - balance0Before;
         uint256 paid1 = balance1After - balance1Before;
 
-        // 没有活跃流动性时无人可分，手续费留在池中不计入累计值
-        if (_liquidity > 0) {
-            unchecked {
-                if (paid0 > 0) feeGrowthGlobal0X128 += Math.mulDiv(paid0, Position.Q128, _liquidity);
-                if (paid1 > 0) feeGrowthGlobal1X128 += Math.mulDiv(paid1, Position.Q128, _liquidity);
-            }
+        unchecked {
+            if (paid0 > 0) feeGrowthGlobal0X128 += Math.mulDiv(paid0, Position.Q128, _liquidity);
+            if (paid1 > 0) feeGrowthGlobal1X128 += Math.mulDiv(paid1, Position.Q128, _liquidity);
         }
 
         emit Flash(msg.sender, recipient, amount0, amount1, paid0, paid1);
