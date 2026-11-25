@@ -8,8 +8,9 @@ import (
 // TestGetSqrtRatioAtTick 验证链下 Go 实现与链上 Solidity 的计算一致性
 //
 // 测试策略：
-//   使用已知的 tick -> sqrtPriceX96 映射值（从 Solidity 合约中获取）
-//   确保 Go 实现的每一个输出都与 Solidity 完全匹配（bit-exact）
+//
+//	使用已知的 tick -> sqrtPriceX96 映射值（从 Solidity 合约中获取）
+//	确保 Go 实现的每一个输出都与 Solidity 完全匹配（bit-exact）
 func TestGetSqrtRatioAtTick(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -145,5 +146,36 @@ func TestAlignTick(t *testing.T) {
 	}
 	if got := AlignTick(-65, 60, -1); got != -120 {
 		t.Errorf("align down -65 to 60-spacing: got %d", got)
+	}
+}
+
+// TestComputeSwapStepPartial 输入不足以到达目标价格时，价格只应移动到输入能推到的位置
+func TestComputeSwapStepPartial(t *testing.T) {
+	liquidity, _ := new(big.Int).SetString("1000000000000000000000000", 10) // 1e24
+	amountIn := big.NewInt(1e18)
+	target, _ := GetSqrtRatioAtTick(-10)
+
+	for _, zeroForOne := range []bool{true, false} {
+		if !zeroForOne {
+			target, _ = GetSqrtRatioAtTick(10)
+		}
+		next, in, out, fee := ComputeSwapStep(Q96, target, liquidity, amountIn, Fee3000)
+
+		if next.Cmp(target) == 0 || next.Cmp(Q96) == 0 {
+			t.Fatalf("zeroForOne=%v: price should stop between current and target, got %s", zeroForOne, next)
+		}
+		if zeroForOne != (next.Cmp(Q96) < 0) {
+			t.Fatalf("zeroForOne=%v: price moved the wrong way", zeroForOne)
+		}
+		// 输入被完全消耗
+		if total := new(big.Int).Add(in, fee); total.Cmp(amountIn) != 0 {
+			t.Fatalf("zeroForOne=%v: in+fee = %s, want %s", zeroForOne, total, amountIn)
+		}
+		// 价格 1:1、流动性远大于输入：产出略低于 输入 × (1 - 0.3%)
+		upper := big.NewInt(997e15)
+		lower := big.NewInt(996e15)
+		if out.Cmp(upper) >= 0 || out.Cmp(lower) <= 0 {
+			t.Fatalf("zeroForOne=%v: out = %s, want in (%s, %s)", zeroForOne, out, lower, upper)
+		}
 	}
 }

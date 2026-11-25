@@ -62,13 +62,13 @@ func DefaultRouterConfig() RouterConfig {
 
 // Route 表示一条交易路径
 type Route struct {
-	Pools       []indexer.PoolSnapshot // 经过的池子
-	Path        []string              // token 路径，如 [WETH, USDC, DAI]
-	AmountIn    *big.Int              // 输入数量
-	AmountOut   *big.Int              // 预期输出
-	GasEstimate uint64                // 预估 Gas
-	TicksCrossed int                  // 预估穿越的 tick 数量
-	IsDegraded  bool                  // 是否为降级路径
+	Pools        []indexer.PoolSnapshot // 经过的池子
+	Path         []string               // token 路径，如 [WETH, USDC, DAI]
+	AmountIn     *big.Int               // 输入数量
+	AmountOut    *big.Int               // 预期输出
+	GasEstimate  uint64                 // 预估 Gas
+	TicksCrossed int                    // 预估穿越的 tick 数量
+	IsDegraded   bool                   // 是否为降级路径
 }
 
 // Router 智能路由引擎
@@ -102,10 +102,10 @@ type searchState struct {
 }
 
 type searchNode struct {
-	token   string
-	pools   []indexer.PoolSnapshot
-	path    []string
-	depth   int
+	token string
+	pools []indexer.PoolSnapshot
+	path  []string
+	depth int
 }
 
 // NewRouter 创建路由引擎
@@ -128,12 +128,12 @@ func NewRouter(config RouterConfig, stateManager *indexer.PoolStateManager) *Rou
 // FindBestRoute 查找最优交易路径
 //
 // 二级降级流程：
-//   1. 尝试获取 Worker 信号量（背压控制）
-//      - 如果信号量已满，直接走降级路径（避免请求堆积）
-//   2. 带超时的 BFS 搜索（Level 1）
-//      - 超时 200ms 后自动取消
-//   3. 如果 Level 1 失败/超时，执行 Level 2 降级
-//   4. 检查 tick 穿越数量，必要时发出高 Gas 警告
+//  1. 尝试获取 Worker 信号量（背压控制）
+//     - 如果信号量已满，直接走降级路径（避免请求堆积）
+//  2. 带超时的 BFS 搜索（Level 1）
+//     - 超时 200ms 后自动取消
+//  3. 如果 Level 1 失败/超时，执行 Level 2 降级
+//  4. 检查 tick 穿越数量，必要时发出高 Gas 警告
 func (r *Router) FindBestRoute(
 	ctx context.Context,
 	tokenIn, tokenOut string,
@@ -192,10 +192,10 @@ func (r *Router) FindBestRoute(
 // searchRoutes BFS 搜索最优路径
 //
 // 搜索策略：
-//   1. 从 tokenIn 出发，BFS 遍历所有可达的池子
-//   2. 每一跳检查是否到达 tokenOut
-//   3. 通过 context 超时控制搜索时间
-//   4. 使用 sync.Pool 复用搜索状态，减少 GC 压力
+//  1. 从 tokenIn 出发，BFS 遍历所有可达的池子
+//  2. 每一跳检查是否到达 tokenOut
+//  3. 通过 context 超时控制搜索时间
+//  4. 使用 sync.Pool 复用搜索状态，减少 GC 压力
 func (r *Router) searchRoutes(
 	ctx context.Context,
 	tokenIn, tokenOut string,
@@ -271,8 +271,7 @@ func (r *Router) searchRoutes(
 					Pools:    newPools,
 					Path:     newPath,
 					AmountIn: amountIn,
-					// 实际产出需要通过 SimulateSwap 计算
-					AmountOut:    r.estimateOutput(newPools, amountIn),
+					AmountOut:    r.estimateOutput(newPools, tokenIn, amountIn),
 					GasEstimate:  uint64(150000 * len(newPools)),
 					TicksCrossed: len(newPools) * 10, // 简化估算
 				}
@@ -320,7 +319,7 @@ func (r *Router) degradedRoute(
 				Pools:        []indexer.PoolSnapshot{pool},
 				Path:         []string{tokenIn, tokenOut},
 				AmountIn:     amountIn,
-				AmountOut:    r.estimateOutput([]indexer.PoolSnapshot{pool}, amountIn),
+				AmountOut:    r.estimateOutput([]indexer.PoolSnapshot{pool}, tokenIn, amountIn),
 				GasEstimate:  150000,
 				TicksCrossed: 10,
 				IsDegraded:   true,
@@ -332,23 +331,27 @@ func (r *Router) degradedRoute(
 }
 
 // estimateOutput 估算路径的输出数量
-func (r *Router) estimateOutput(pools []indexer.PoolSnapshot, amountIn *big.Int) *big.Int {
-	if len(pools) == 0 || amountIn.Sign() == 0 {
+//
+// 沿路径逐池调用 SimulateSwap，用与链上相同的定点数公式计算每一跳的产出。
+func (r *Router) estimateOutput(pools []indexer.PoolSnapshot, tokenIn string, amountIn *big.Int) *big.Int {
+	if len(pools) == 0 || amountIn.Sign() <= 0 {
 		return big.NewInt(0)
 	}
 
-	current := new(big.Int).Set(amountIn)
+	current := amountIn
+	token := tokenIn
 	for _, pool := range pools {
-		if pool.Liquidity.Sign() == 0 {
+		// 没有流动性或还没有价格（尚未发生过 swap）的池子无法报价
+		if pool.Liquidity.Sign() == 0 || pool.SqrtPriceX96.Sign() == 0 {
 			return big.NewInt(0)
 		}
-		// 简化估算：基于 x*y=k 模型近似
-		// 实际实现应该使用完整的 ComputeSwapStep 逐 tick 模拟
-		fee := big.NewInt(int64(pool.Fee))
-		million := big.NewInt(1e6)
-		afterFee := new(big.Int).Mul(current, new(big.Int).Sub(million, fee))
-		afterFee.Div(afterFee, million)
-		current = afterFee
+		zeroForOne := token == pool.Token0
+		current, _, _, _ = SimulateSwap(pool.SqrtPriceX96, pool.Liquidity, pool.Tick, pool.Fee, current, zeroForOne)
+		if zeroForOne {
+			token = pool.Token1
+		} else {
+			token = pool.Token0
+		}
 	}
 	return current
 }

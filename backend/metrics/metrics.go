@@ -300,4 +300,6 @@ var (
 	CacheMissesTotal       = DefaultRegistry.Counter("cache_misses_total")
 	CircuitBreakerOpen     = DefaultRegistry.Gauge("circuitbreaker_open")
 	WorkerPoolQueueUsed    = DefaultRegistry.Gauge("workerpool_queue_used")
+	MEVSandwichDetected    = DefaultRegistry.Counter("mev_sandwich_detected_total")
+	MEVSwapsRejected       = DefaultRegistry.Counter("mev_swaps_rejected_total")
 )

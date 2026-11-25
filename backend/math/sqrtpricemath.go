@@ -87,6 +87,20 @@ func DivRoundingUp(a, b *big.Int) *big.Int {
 	return result
 }
 
+// GetNextSqrtPriceFromInput 计算投入 amountIn 后的新价格（对应 Solidity 的 getNextSqrtPriceFromInput）
+//
+//	token0 进池（价格下降）：sqrtP' = L × sqrtP / (L + amountIn × sqrtP)，向上取整
+//	token1 进池（价格上升）：sqrtP' = sqrtP + amountIn / L，向下取整
+func GetNextSqrtPriceFromInput(sqrtPrice, liquidity, amountIn *big.Int, zeroForOne bool) *big.Int {
+	if zeroForOne {
+		numerator := new(big.Int).Lsh(liquidity, 96)
+		denominator := new(big.Int).Add(numerator, new(big.Int).Mul(amountIn, sqrtPrice))
+		return MulDivRoundingUp(numerator, sqrtPrice, denominator)
+	}
+	delta := new(big.Int).Div(new(big.Int).Lsh(amountIn, 96), liquidity)
+	return new(big.Int).Add(sqrtPrice, delta)
+}
+
 // ComputeSwapStep 链下复现单步 swap 计算
 //
 // 返回值：(sqrtPriceNext, amountIn, amountOut, feeAmount)
@@ -117,12 +131,17 @@ func ComputeSwapStep(
 			amountIn = GetAmount1Delta(sqrtPriceCurrent, sqrtPriceTarget, liquidity, true)
 		}
 
-		if amountRemainingLessFee.Cmp(amountIn) >= 0 {
+		reachedTarget := amountRemainingLessFee.Cmp(amountIn) >= 0
+		if reachedTarget {
 			sqrtPriceNext = new(big.Int).Set(sqrtPriceTarget)
 		} else {
-			// 输入不足以到达目标价格，计算实际能到达的价格
-			sqrtPriceNext = new(big.Int).Set(sqrtPriceTarget) // 简化：使用目标价格
-			amountIn = new(big.Int).Set(amountRemainingLessFee)
+			// 输入不足以到达目标价格：按实际输入算出能推到的价格，再反算实际消耗的输入
+			sqrtPriceNext = GetNextSqrtPriceFromInput(sqrtPriceCurrent, liquidity, amountRemainingLessFee, zeroForOne)
+			if zeroForOne {
+				amountIn = GetAmount0Delta(sqrtPriceNext, sqrtPriceCurrent, liquidity, true)
+			} else {
+				amountIn = GetAmount1Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, true)
+			}
 		}
 
 		// 计算输出
@@ -132,8 +151,12 @@ func ComputeSwapStep(
 			amountOut = GetAmount0Delta(sqrtPriceCurrent, sqrtPriceNext, liquidity, false)
 		}
 
-		// 手续费
-		feeAmount = MulDivRoundingUp(amountIn, fee, new(big.Int).Sub(million, fee))
+		// 手续费：没走到目标价格时，剩余输入全部计为手续费（与链上一致）
+		if reachedTarget {
+			feeAmount = MulDivRoundingUp(amountIn, fee, new(big.Int).Sub(million, fee))
+		} else {
+			feeAmount = new(big.Int).Sub(new(big.Int).Abs(amountRemaining), amountIn)
+		}
 	} else {
 		// exactOutput 模式（简化实现）
 		if zeroForOne {
