@@ -2,6 +2,7 @@ package api
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -124,7 +125,11 @@ func (rl *RateLimiter) Allow(ip string) bool {
 // Middleware 返回 HTTP 中间件
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
+		// RemoteAddr 是 "IP:端口"，每个连接的端口都不同，必须去掉端口才是按 IP 限流
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
 
 		if !rl.Allow(ip) {
 			w.Header().Set("Retry-After", "1")
@@ -176,6 +181,18 @@ type loggingResponseWriter struct {
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.statusCode = code
 	lrw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush 透传给底层 ResponseWriter，否则 SSE 这类流式响应发不出去
+func (lrw *loggingResponseWriter) Flush() {
+	if f, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 让 http.ResponseController 能找到底层 ResponseWriter
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
 }
 
 // CORSMiddleware 跨域中间件
