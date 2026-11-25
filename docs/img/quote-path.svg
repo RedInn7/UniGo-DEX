@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="'Inter','SF Pro Display','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC','Segoe UI',system-ui,sans-serif">
+<!-- 一次报价请求的路径 -->
+<defs>
+<linearGradient id="g-client" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+<linearGradient id="g-gate" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0891b2"/></linearGradient>
+<linearGradient id="g-core" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+<linearGradient id="g-teal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/></linearGradient>
+<linearGradient id="g-state" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#047857"/></linearGradient>
+<linearGradient id="g-chain" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#c2410c"/></linearGradient>
+<linearGradient id="g-risk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#9d174d"/></linearGradient>
+<linearGradient id="g-violet" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/></linearGradient>
+<linearGradient id="g-grey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#475569"/><stop offset="1" stop-color="#334155"/></linearGradient>
+<linearGradient id="g-chip" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+<linearGradient id="g-title" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#a78bfa"/><stop offset="1" stop-color="#f9a8d4"/></linearGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#ffffff" fill-opacity=".04"/></pattern>
+<filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".3"/></filter>
+<filter id="glow" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="8" result="b"/><feFlood flood-color="#38bdf8" flood-opacity=".55"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#fbbf24"/></marker>
+<marker id="a-tx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f472b6"/></marker>
+<style>
+.layer{fill:#ffffff;fill-opacity:.03;stroke:#ffffff;stroke-opacity:.1;stroke-width:1}
+.lt{font-size:12px;font-weight:700;letter-spacing:1.5px;fill:#8b949e}
+.box{stroke:rgba(255,255,255,.15);stroke-width:1.2}
+.tag{font:500 10px 'JetBrains Mono','SF Mono',Menlo,Consolas,'PingFang SC','Microsoft YaHei',monospace;fill:#fff;fill-opacity:.72}
+.t{font-size:15px;font-weight:700;fill:#fff}
+.s{font-size:11px;fill:#fff;fill-opacity:.82}
+.c1{font-size:13px;font-weight:700;fill:#fff}
+.c2{font-size:10px;fill:#fff;fill-opacity:.8}
+.note{font-size:11px;fill:#8b949e}
+.p{font-size:12px;fill:#c9d1d9}
+.hl{font-size:12px;font-weight:700;fill:#7dd3fc}
+.sync{fill:none;stroke:#38bdf8;stroke-width:1.8}
+.async{fill:none;stroke:#fbbf24;stroke-width:1.8;stroke-dasharray:5 5;animation:flow 1.2s linear infinite}
+.tx{fill:none;stroke:#f472b6;stroke-width:1.8}
+@keyframes flow{to{stroke-dashoffset:-20}}
+@media (prefers-reduced-motion:reduce){.async{animation:none}}
+</style>
+</defs>
+
+<rect width="1200" height="800" fill="#0d1117"/><rect width="1200" height="800" fill="url(#dots)"/>
+<text x="40" y="40" font-size="24" font-weight="800" fill="url(#g-title)">一次报价请求的路径</text>
+<text x="40" y="62" font-size="12.5" fill="#8b949e">GET /api/v1/quote：先查缓存，没有再搜路由、逐 tick 模拟，最后过一遍价格校验和滑点推荐。</text>
+<!-- Layer A: 接入 -->
+<rect class="layer" x="40" y="76" width="1120" height="120" rx="12"/>
+<text class="lt" x="64" y="93" text-anchor="start">ENTRY 接入</text>
+<rect class="box" x="64" y="104" width="220" height="78" rx="8" ry="8" fill="url(#g-client)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="174.0" y="130.0">[Client]</text><text class="t" style="font-size:15px" x="174.0" y="149.0">GET /quote</text><text class="s" x="174.0" y="164.0">token_in · token_out · amount_in</text></g>
+<rect class="box" x="344" y="104" width="300" height="78" rx="8" ry="8" fill="url(#g-gate)" filter="url(#glow)"/>
+<g text-anchor="middle"><text class="tag" x="494.0" y="129.0">[Middleware] backend/api</text><text class="t" style="font-size:17px" x="494.0" y="150.0">API Server</text><text class="s" x="494.0" y="165.0">Trace → 限流 (429) → 背压 (503)</text></g>
+<rect class="box" x="704" y="104" width="432" height="78" rx="8" ry="8" fill="url(#g-teal)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="920.0" y="130.0">[Cache] cache.GetOrLoad</text><text class="t" style="font-size:15px" x="920.0" y="149.0">报价缓存 · Singleflight</text><text class="s" x="920.0" y="164.0">key = 币对 + 金额 + 最新区块号；并发的同 key 请求只算一次</text></g>
+<path class="sync" d="M284 143 H342" marker-end="url(#a-sync)"/>
+<path class="sync" d="M644 143 H702" marker-end="url(#a-sync)"/>
+<path class="sync" d="M760 182 V214 H174 V262" marker-end="url(#a-sync)"/>
+<text class="note" x="184" y="208" text-anchor="start" >未命中：只有一个请求去算，其余等结果</text>
+<path class="sync" d="M1136 143 H1148 V635 H1116" marker-end="url(#a-sync)"/>
+<text class="note" x="1138" y="208" text-anchor="end" >命中：跳过路由引擎</text>
+<!-- Layer B: 路由引擎 -->
+<rect class="layer" x="40" y="232" width="1120" height="288" rx="12"/>
+<text class="lt" x="200" y="249" text-anchor="start">ROUTER 路由引擎 · backend/router</text>
+<rect class="box" x="64" y="264" width="220" height="86" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="174.0" y="286.5">[DFS] enumeratePaths</text><text class="t" style="font-size:15px" x="174.0" y="305.5">枚举候选路径</text><text class="s" x="174.0" y="320.5">最多 3 跳 · 不重复经过 token</text><text class="s" x="174.0" y="335.5">不同费率算不同路径 · 上限 64 条</text></g>
+<rect x="324" y="264" width="500" height="200" rx="8" ry="8" fill="#172554" fill-opacity=".55" stroke="#38bdf8" stroke-opacity=".45" stroke-width="1.2" filter="url(#shadow)"/>
+<text class="tag" x="574" y="284" text-anchor="middle" >[Worker Pool] 并发评估：每条候选逐池、逐 tick 模拟</text>
+<rect class="box" x="344" y="298" width="460" height="34" rx="8" ry="8" fill="url(#g-core)"/>
+<text class="c1" x="574" y="320" text-anchor="middle" style="font-size:12.5px;font-weight:600">① WETH → USDC → DAI → WBTC · 费率 0.05% / 0.05% / 0.3%</text>
+<rect class="box" x="344" y="342" width="460" height="34" rx="8" ry="8" fill="url(#g-core)"/>
+<text class="c1" x="574" y="364" text-anchor="middle" style="font-size:12.5px;font-weight:600">② WETH → USDC → DAI → WBTC · 费率 0.3% / 0.05% / 1%</text>
+<rect class="box" x="344" y="386" width="460" height="34" rx="8" ry="8" fill="url(#g-core)"/>
+<text class="c1" x="574" y="408" text-anchor="middle" style="font-size:12.5px;font-weight:600">…… WETH → WBTC 一共 8 条候选，每条模拟 3 次 swap</text>
+<text class="s" x="574" y="449" text-anchor="middle" >队列满了就在当前协程里算，不丢候选</text>
+<rect class="box" x="864" y="264" width="250" height="86" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="989.0" y="286.5">[Best]</text><text class="t" style="font-size:15px" x="989.0" y="305.5">取产出最高的一条</text><text class="s" x="989.0" y="320.5">顺带估 gas：每跳 15 万</text><text class="s" x="989.0" y="335.5">每穿越一个 tick 再加 2.5 万</text></g>
+<rect class="box" x="64" y="378" width="220" height="86" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="174.0" y="400.5">[State] PoolStateManager</text><text class="t" style="font-size:15px" x="174.0" y="419.5">池子快照</text><text class="s" x="174.0" y="434.5">索引器回放事件得到</text><text class="s" x="174.0" y="449.5">价格 · tick · liquidityNet</text></g>
+<rect class="box" x="864" y="378" width="250" height="86" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="989.0" y="400.5">[Fallback]</text><text class="t" style="font-size:15px" x="989.0" y="419.5">降级：只看直连池</text><text class="s" x="989.0" y="434.5">搜索超过 200ms，或同时在搜的</text><text class="s" x="989.0" y="449.5">已满 200 个 → IsDegraded</text></g>
+<path class="sync" d="M284 307 H322" marker-end="url(#a-sync)"/>
+<path class="sync" d="M824 307 H862" marker-end="url(#a-sync)"/>
+<path class="async" d="M284 421 H322" marker-end="url(#a-async)"/>
+<path class="async" d="M824 421 H862" marker-end="url(#a-async)"/>
+<path class="async" d="M989 378 V352" marker-end="url(#a-async)"/>
+<text class="p" x="64" y="498" text-anchor="start" >单池模拟一笔不跨 tick 的 swap 约 4.1 µs，穿越 20 个 tick 约 40 µs；8 条三跳候选并发评估 109.0 µs，串行 187.4 µs。</text>
+<path class="sync" d="M1114 307 H1130 V538 H989 V588" marker-end="url(#a-sync)"/>
+<!-- Layer C: 检查与响应 -->
+<rect class="layer" x="40" y="556" width="1120" height="184" rx="12"/>
+<text class="lt" x="64" y="573" text-anchor="start">CHECK 检查与响应</text>
+<rect class="box" x="864" y="590" width="250" height="90" rx="8" ry="8" fill="url(#g-violet)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="989.0" y="614.5">[Oracle] checkPriceSafety</text><text class="t" style="font-size:15px" x="989.0" y="633.5">价格三方校验</text><text class="s" x="989.0" y="648.5">路径上每个池子各查一遍</text><text class="s" x="989.0" y="663.5">报价只给警告，不拒绝</text></g>
+<rect class="box" x="584" y="590" width="240" height="90" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="704.0" y="614.5">[MEV] RecommendSlippage</text><text class="t" style="font-size:15px" x="704.0" y="633.5">推荐滑点</text><text class="s" x="704.0" y="648.5">默认 0.5%</text><text class="s" x="704.0" y="663.5">池子 10 分钟内被夹过 → 0.1%</text></g>
+<rect class="box" x="324" y="590" width="220" height="90" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="434.0" y="614.5">[Gas] EIP-1559</text><text class="t" style="font-size:15px" x="434.0" y="633.5">Gas 成本</text><text class="s" x="434.0" y="648.5">baseFee + 小费</text><text class="s" x="434.0" y="663.5">节点取不到就用静态值</text></g>
+<rect class="box" x="64" y="590" width="220" height="90" rx="8" ry="8" fill="url(#g-client)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="174.0" y="614.5">[Response] 200 · JSON</text><text class="t" style="font-size:15px" x="174.0" y="633.5">返回报价</text><text class="s" x="174.0" y="648.5">amount_out · min_amount_out</text><text class="s" x="174.0" y="663.5">path · fees · price_checks</text></g>
+<path class="sync" d="M864 635 H826" marker-end="url(#a-sync)"/>
+<path class="sync" d="M584 635 H546" marker-end="url(#a-sync)"/>
+<path class="sync" d="M324 635 H286" marker-end="url(#a-sync)"/>
+<path class="sync" d="M64 635 H52 V143 H62" marker-end="url(#a-sync)"/>
+<text class="p" x="64" y="716" text-anchor="start" >找不到可成交的路径返回 404。/swap/build 和 /swap 走同一套检查，区别是价格偏离时直接 403。</text>
+<text class="note" x="40" y="774" text-anchor="start" >实测（k6 与后端同机，100 并发）：缓存命中 40,965 RPS、p99 13.40 ms；未命中单跳 31,329 RPS；未命中三跳 11,098 RPS、p99 25.34 ms。</text>
+</svg>
