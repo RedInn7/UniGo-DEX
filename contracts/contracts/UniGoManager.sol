@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IUniGoFactory.sol";
 import "./interfaces/IUniGoPool.sol";
 import "./interfaces/IUniGoPoolCallbacks.sol";
@@ -16,8 +17,8 @@ import "./lib/TickMath.sol";
 ///      4. Manager 支持多跳兑换：按路径依次穿过多个 Pool
 ///
 ///      【工作流程】
-///      用户 -> Manager.mint() -> Pool.mint() -> Manager.uniGoMintCallback() -> token.transferFrom(用户)
-///      用户 -> Manager.swap() -> Pool.swap() -> Manager.uniGoSwapCallback() -> token.transferFrom(用户)
+///      用户 -> Manager.mint() -> Pool.mint() -> Manager.uniGoMintCallback() -> token.safeTransferFrom(用户)
+///      用户 -> Manager.swap() -> Pool.swap() -> Manager.uniGoSwapCallback() -> token.safeTransferFrom(用户)
 ///
 ///      【路径编码】
 ///      多跳路径是紧凑编码的字节串：token(20 字节) + fee(3 字节) + token(20 字节) + fee + token ...
@@ -29,6 +30,8 @@ import "./lib/TickMath.sol";
 ///
 ///      注意：用户需要先 approve Manager 合约才能使用
 contract UniGoManager is IUniGoPoolCallbacks {
+    using SafeERC20 for IERC20;
+
     /// @dev 路径中一个地址的字节数
     uint256 private constant ADDR_SIZE = 20;
     /// @dev 路径中一跳（fee + token）的字节数
@@ -54,7 +57,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
     struct SwapParams {
         address pool;              // Pool 合约地址
         bool zeroForOne;           // 交易方向
-        int256 amountSpecified;    // 交易数量（正=精确输入，负=精确输出）
+        int256 amountSpecified;    // 输入 token 数量，必须为正（精确输出请用 exactOutputSingle）
         uint160 sqrtPriceLimitX96; // 价格限制
         address recipient;         // 接收者地址
         uint256 amountOutMinimum;  // 最少到手的输出 token 数量（滑点保护）
@@ -131,7 +134,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
 
     // ==================== 代币交换 ====================
 
-    /// @notice 单池代币交换
+    /// @notice 单池代币交换（精确输入）
     /// @param params swap 参数
     /// @return amount0 token0 的变化量
     /// @return amount1 token1 的变化量
@@ -140,6 +143,8 @@ contract UniGoManager is IUniGoPoolCallbacks {
         checkDeadline(params.deadline)
         returns (int256 amount0, int256 amount1)
     {
+        // 只接受精确输入：精确输出在这里没有输入上限保护，必须走 exactOutputSingle
+        require(params.amountSpecified > 0, "AS");
         CallbackData memory data = _verifyPool(params.pool, msg.sender);
 
         (amount0, amount1) = IUniGoPool(params.pool).swap(
@@ -151,7 +156,6 @@ contract UniGoManager is IUniGoPoolCallbacks {
         );
 
         // 滑点保护：负数表示 Pool 转出，即用户实际到手的数量
-        // 精确输出需要限制输入上限时，使用 exactOutputSingle
         uint256 amountOut = uint256(-(params.zeroForOne ? amount1 : amount0));
         require(amountOut >= params.amountOutMinimum, "SLP");
     }
@@ -335,9 +339,9 @@ contract UniGoManager is IUniGoPoolCallbacks {
     /// @dev 付款：多跳中间跳由 Manager 用自己收到的 token 付，其余从用户处划转
     function _pay(address token, address payer, address to, uint256 amount) private {
         if (payer == address(this)) {
-            IERC20(token).transfer(to, amount);
+            IERC20(token).safeTransfer(to, amount);
         } else {
-            IERC20(token).transferFrom(payer, to, amount);
+            IERC20(token).safeTransferFrom(payer, to, amount);
         }
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IUniGoPool.sol";
 import "./interfaces/IUniGoPoolCallbacks.sol";
 import "./lib/Tick.sol";
@@ -44,6 +45,8 @@ import "./lib/Oracle.sol";
 ///      - swap 与闪电贷的手续费按当时的活跃流动性均摊，累计进 feeGrowthGlobal
 ///      - position 在 mint/burn 时结算应得手续费到 tokensOwed，再通过 collect 提取
 contract UniGoPool is IUniGoPool {
+    using SafeERC20 for IERC20;
+
     using Tick for mapping(int24 => Tick.Info);
     using TickBitmap for mapping(int16 => uint256);
     using Position for mapping(bytes32 => Position.Info);
@@ -62,6 +65,8 @@ contract UniGoPool is IUniGoPool {
     int24 public immutable tickSpacing;
     /// @notice 创建此池的工厂合约地址
     address public immutable factory;
+    /// @notice 单个 tick 允许承载的最大流动性（由 tickSpacing 决定）
+    uint128 public immutable maxLiquidityPerTick;
 
     // ==================== 核心状态 ====================
 
@@ -153,6 +158,7 @@ contract UniGoPool is IUniGoPool {
         token1 = _token1;
         fee = _fee;
         tickSpacing = _tickSpacing;
+        maxLiquidityPerTick = Tick.tickSpacingToMaxLiquidityPerTick(_tickSpacing);
     }
 
     // ==================== 初始化 ====================
@@ -333,10 +339,10 @@ contract UniGoPool is IUniGoPool {
         position.tokensOwed1 -= amount1;
 
         if (amount0 > 0) {
-            IERC20(token0).transfer(recipient, amount0);
+            IERC20(token0).safeTransfer(recipient, amount0);
         }
         if (amount1 > 0) {
-            IERC20(token1).transfer(recipient, amount1);
+            IERC20(token1).safeTransfer(recipient, amount1);
         }
 
         emit Collect(msg.sender, recipient, tickLower, tickUpper, amount0, amount1);
@@ -488,7 +494,7 @@ contract UniGoPool is IUniGoPool {
         if (zeroForOne) {
             // token0 -> token1：转出 token1，回调接收 token0
             if (amount1 < 0) {
-                IERC20(token1).transfer(recipient, uint256(-amount1));
+                IERC20(token1).safeTransfer(recipient, uint256(-amount1));
             }
             uint256 balance0Before = balance0();
             IUniGoPoolCallbacks(msg.sender).uniGoSwapCallback(amount0, amount1, data);
@@ -496,7 +502,7 @@ contract UniGoPool is IUniGoPool {
         } else {
             // token1 -> token0：转出 token0，回调接收 token1
             if (amount0 < 0) {
-                IERC20(token0).transfer(recipient, uint256(-amount0));
+                IERC20(token0).safeTransfer(recipient, uint256(-amount0));
             }
             uint256 balance1Before = balance1();
             IUniGoPoolCallbacks(msg.sender).uniGoSwapCallback(amount0, amount1, data);
@@ -510,6 +516,7 @@ contract UniGoPool is IUniGoPool {
 
     /// @inheritdoc IUniGoPool
     /// @dev flash 流程：
+    ///      0. 要求当前有活跃流动性（否则手续费没有 LP 可分）
     ///      1. 按池子费率计算手续费（向上取整）
     ///      2. 把借出的 token 转给 recipient
     ///      3. 回调调用者，调用者必须在回调内归还本金 + 手续费
@@ -522,14 +529,16 @@ contract UniGoPool is IUniGoPool {
         bytes calldata data
     ) external override lock {
         uint128 _liquidity = liquidity;
+        // 没有活跃流动性时手续费无人可分，会永久锁在池子里，直接拒绝
+        require(_liquidity > 0, "L");
 
         uint256 fee0 = Math.mulDivRoundingUp(amount0, fee, 1e6);
         uint256 fee1 = Math.mulDivRoundingUp(amount1, fee, 1e6);
         uint256 balance0Before = balance0();
         uint256 balance1Before = balance1();
 
-        if (amount0 > 0) IERC20(token0).transfer(recipient, amount0);
-        if (amount1 > 0) IERC20(token1).transfer(recipient, amount1);
+        if (amount0 > 0) IERC20(token0).safeTransfer(recipient, amount0);
+        if (amount1 > 0) IERC20(token1).safeTransfer(recipient, amount1);
 
         IUniGoPoolCallbacks(msg.sender).uniGoFlashCallback(fee0, fee1, data);
 
@@ -544,12 +553,9 @@ contract UniGoPool is IUniGoPool {
         uint256 paid0 = balance0After - balance0Before;
         uint256 paid1 = balance1After - balance1Before;
 
-        // 没有活跃流动性时无人可分，手续费留在池中不计入累计值
-        if (_liquidity > 0) {
-            unchecked {
-                if (paid0 > 0) feeGrowthGlobal0X128 += Math.mulDiv(paid0, Position.Q128, _liquidity);
-                if (paid1 > 0) feeGrowthGlobal1X128 += Math.mulDiv(paid1, Position.Q128, _liquidity);
-            }
+        unchecked {
+            if (paid0 > 0) feeGrowthGlobal0X128 += Math.mulDiv(paid0, Position.Q128, _liquidity);
+            if (paid1 > 0) feeGrowthGlobal1X128 += Math.mulDiv(paid1, Position.Q128, _liquidity);
         }
 
         emit Flash(msg.sender, recipient, amount0, amount1, paid0, paid1);
@@ -630,11 +636,13 @@ contract UniGoPool is IUniGoPool {
         if (liquidityDelta != 0) {
             // 下界 tick（upper=false，穿过时流动性增加）
             flippedLower = ticks.update(
-                tickLower, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, false
+                tickLower, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, false,
+                maxLiquidityPerTick
             );
             // 上界 tick（upper=true，穿过时流动性减少）
             flippedUpper = ticks.update(
-                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true
+                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true,
+                maxLiquidityPerTick
             );
 
             // 如果 tick 的初始化状态发生翻转，更新位图

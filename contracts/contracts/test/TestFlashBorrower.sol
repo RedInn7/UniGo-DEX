@@ -2,12 +2,15 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/IUniGoPool.sol";
 
 /// @title TestFlashBorrower
 /// @notice 仅用于测试的闪电贷借款合约
 /// @dev 通过 mode 模拟三种借款人：正常还款 / 不还款 / 在回调里重入 Pool
 contract TestFlashBorrower {
+    using SafeERC20 for IERC20;
+
     enum Mode {
         Repay,      // 归还本金 + 手续费
         NoRepay,    // 什么都不还
@@ -53,8 +56,8 @@ contract TestFlashBorrower {
 
         // 归还本金 + 手续费（手续费需要本合约事先持有）
         (address token0, address token1) = _poolTokens(decoded.pool);
-        if (decoded.amount0 > 0) IERC20(token0).transfer(msg.sender, decoded.amount0 + fee0);
-        if (decoded.amount1 > 0) IERC20(token1).transfer(msg.sender, decoded.amount1 + fee1);
+        if (decoded.amount0 > 0) IERC20(token0).safeTransfer(msg.sender, decoded.amount0 + fee0);
+        if (decoded.amount1 > 0) IERC20(token1).safeTransfer(msg.sender, decoded.amount1 + fee1);
     }
 
     /// @dev 读取 Pool 的 token0 / token1 地址
