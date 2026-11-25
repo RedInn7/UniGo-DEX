@@ -1,0 +1,15 @@
+{
+  "name": "unigo-dex-subgraph",
+  "version": "1.0.0",
+  "private": true,
+  "description": "UniGo-DEX 的 The Graph 子图：索引池子、交易、流动性、闪电贷与 K 线",
+  "scripts": {
+    "abis": "node -e \"const fs=require('fs');for(const n of ['UniGoFactory','UniGoPool'])fs.writeFileSync('abis/'+n+'.json',JSON.stringify(require('../contracts/artifacts/contracts/'+n+'.sol/'+n+'.json').abi,null,2)+'\\n')\"",
+    "codegen": "graph codegen",
+    "build": "graph build"
+  },
+  "devDependencies": {
+    "@graphprotocol/graph-cli": "0.98.1",
+    "@graphprotocol/graph-ts": "0.38.2"
+  }
+}

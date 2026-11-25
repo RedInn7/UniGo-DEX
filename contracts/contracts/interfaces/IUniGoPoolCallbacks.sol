@@ -35,4 +35,15 @@ interface IUniGoPoolCallbacks {
         int256 amount1Delta,
         bytes calldata data
     ) external;
+
+    /// @notice flash（闪电贷）的回调
+    /// @dev 调用者必须在此回调中向 Pool 归还借出的本金，并支付手续费
+    /// @param fee0 需要支付的 token0 手续费
+    /// @param fee1 需要支付的 token1 手续费
+    /// @param data 调用者传递的额外数据
+    function uniGoFlashCallback(
+        uint256 fee0,
+        uint256 fee1,
+        bytes calldata data
+    ) external;
 }

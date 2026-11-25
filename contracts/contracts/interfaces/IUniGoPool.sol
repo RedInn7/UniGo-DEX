@@ -8,6 +8,8 @@ pragma solidity ^0.8.20;
 ///      - 添加/移除流动性（mint/burn）
 ///      - 代币交换（swap）
 ///      - 提取手续费（collect）
+///      - 闪电贷（flash）
+///      - 价格预言机（observe）
 interface IUniGoPool {
     /// @notice 添加流动性事件
     /// @param sender 调用 mint 的地址（通常是 Manager 合约）
@@ -64,6 +66,44 @@ interface IUniGoPool {
         uint128 amount0,
         uint128 amount1
     );
+
+    /// @notice 闪电贷事件
+    /// @param sender 调用 flash 的地址
+    /// @param recipient 接收借出 token 的地址
+    /// @param amount0 借出的 token0 数量
+    /// @param amount1 借出的 token1 数量
+    /// @param paid0 实际支付的 token0 手续费
+    /// @param paid1 实际支付的 token1 手续费
+    event Flash(
+        address indexed sender,
+        address indexed recipient,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 paid0,
+        uint256 paid1
+    );
+
+    /// @notice 池子初始化事件
+    /// @param sqrtPriceX96 初始价格（Q64.96 格式）
+    /// @param tick 初始价格对应的 tick
+    event Initialize(uint160 sqrtPriceX96, int24 tick);
+
+    /// @notice 预言机观测容量扩容事件
+    /// @param observationCardinalityNextOld 扩容前的预留容量
+    /// @param observationCardinalityNextNew 扩容后的预留容量
+    event IncreaseObservationCardinalityNext(
+        uint16 observationCardinalityNextOld,
+        uint16 observationCardinalityNextNew
+    );
+
+    /// @notice 池子的 token0 地址（地址较小的 token）
+    function token0() external view returns (address);
+
+    /// @notice 池子的 token1 地址（地址较大的 token）
+    function token1() external view returns (address);
+
+    /// @notice 手续费率（以百万分之一为单位）
+    function fee() external view returns (uint24);
 
     /// @notice 初始化池子
     /// @param sqrtPriceX96 初始价格（Q64.96 格式）
@@ -128,4 +168,33 @@ interface IUniGoPool {
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external returns (uint128 amount0, uint128 amount1);
+
+    /// @notice 闪电贷：同一笔交易内借出并归还 token
+    /// @dev 调用者必须实现 uniGoFlashCallback，并在回调内归还本金 + 手续费
+    /// @param recipient 接收借出 token 的地址
+    /// @param amount0 借出的 token0 数量
+    /// @param amount1 借出的 token1 数量
+    /// @param data 回调数据
+    function flash(
+        address recipient,
+        uint256 amount0,
+        uint256 amount1,
+        bytes calldata data
+    ) external;
+
+    /// @notice 查询历史时刻的预言机累计值，用于计算 TWAP
+    /// @dev 时间窗口 [t1, t2] 的平均 tick = (tickCumulative(t2) - tickCumulative(t1)) / (t2 - t1)
+    ///      查询的时刻早于最老的观测时 revert
+    /// @param secondsAgos 每个元素是回看的秒数，0 表示当前时刻
+    /// @return tickCumulatives 各时刻的 tick 累计值
+    /// @return secondsPerLiquidityCumulativeX128s 各时刻的每单位流动性秒数累计值
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s);
+
+    /// @notice 扩大预言机观测环形数组的预留容量
+    /// @dev 任何人都可以调用并支付扩容的 gas；容量只增不减
+    /// @param observationCardinalityNext 期望的容量
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }

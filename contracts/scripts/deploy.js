@@ -31,7 +31,7 @@ async function main() {
   // 2. 部署 Manager
   console.log("正在部署 UniGoManager...");
   const Manager = await ethers.getContractFactory("UniGoManager");
-  const manager = await Manager.deploy();
+  const manager = await Manager.deploy(factoryAddr);
   await manager.waitForDeployment();
   const managerAddr = await manager.getAddress();
   console.log("UniGoManager 部署到:", managerAddr);
@@ -39,7 +39,7 @@ async function main() {
   // 3. 部署 Quoter
   console.log("正在部署 UniGoQuoter...");
   const Quoter = await ethers.getContractFactory("UniGoQuoter");
-  const quoter = await Quoter.deploy();
+  const quoter = await Quoter.deploy(factoryAddr);
   await quoter.waitForDeployment();
   const quoterAddr = await quoter.getAddress();
   console.log("UniGoQuoter 部署到:", quoterAddr);
