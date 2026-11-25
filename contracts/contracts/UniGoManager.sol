@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IUniGoFactory.sol";
 import "./interfaces/IUniGoPool.sol";
 import "./interfaces/IUniGoPoolCallbacks.sol";
@@ -16,8 +17,8 @@ import "./lib/TickMath.sol";
 ///      4. Manager 支持多跳兑换：按路径依次穿过多个 Pool
 ///
 ///      【工作流程】
-///      用户 -> Manager.mint() -> Pool.mint() -> Manager.uniGoMintCallback() -> token.transferFrom(用户)
-///      用户 -> Manager.swap() -> Pool.swap() -> Manager.uniGoSwapCallback() -> token.transferFrom(用户)
+///      用户 -> Manager.mint() -> Pool.mint() -> Manager.uniGoMintCallback() -> token.safeTransferFrom(用户)
+///      用户 -> Manager.swap() -> Pool.swap() -> Manager.uniGoSwapCallback() -> token.safeTransferFrom(用户)
 ///
 ///      【路径编码】
 ///      多跳路径是紧凑编码的字节串：token(20 字节) + fee(3 字节) + token(20 字节) + fee + token ...
@@ -29,6 +30,8 @@ import "./lib/TickMath.sol";
 ///
 ///      注意：用户需要先 approve Manager 合约才能使用
 contract UniGoManager is IUniGoPoolCallbacks {
+    using SafeERC20 for IERC20;
+
     /// @dev 路径中一个地址的字节数
     uint256 private constant ADDR_SIZE = 20;
     /// @dev 路径中一跳（fee + token）的字节数
@@ -335,9 +338,9 @@ contract UniGoManager is IUniGoPoolCallbacks {
     /// @dev 付款：多跳中间跳由 Manager 用自己收到的 token 付，其余从用户处划转
     function _pay(address token, address payer, address to, uint256 amount) private {
         if (payer == address(this)) {
-            IERC20(token).transfer(to, amount);
+            IERC20(token).safeTransfer(to, amount);
         } else {
-            IERC20(token).transferFrom(payer, to, amount);
+            IERC20(token).safeTransferFrom(payer, to, amount);
         }
     }
 }
