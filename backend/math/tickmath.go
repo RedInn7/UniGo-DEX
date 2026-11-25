@@ -128,25 +128,33 @@ func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 	tickApprox := math.Log(price) / math.Log(1.0001)
 	tick := int32(math.Floor(tickApprox))
 
-	// 验证并修正：检查 tick 和 tick+1 哪个正确
-	sqrtAtTick, err := GetSqrtRatioAtTick(tick)
-	if err != nil {
-		return 0, err
-	}
-	sqrtAtTickPlus1, err := GetSqrtRatioAtTick(tick + 1)
-	if err != nil {
-		return 0, err
+	if tick < MinTick {
+		tick = MinTick
+	} else if tick >= MaxTick {
+		tick = MaxTick - 1
 	}
 
-	// tick 正确的条件：sqrtAtTick <= sqrtPriceX96 < sqrtAtTick+1
-	if sqrtAtTick.Cmp(sqrtPriceX96) <= 0 && sqrtAtTickPlus1.Cmp(sqrtPriceX96) > 0 {
+	// 浮点近似可能差一两个 tick，用精确的 GetSqrtRatioAtTick 修正到
+	// sqrtRatio(tick) <= sqrtPriceX96 < sqrtRatio(tick+1) 成立为止
+	for {
+		sqrtAtTick, err := GetSqrtRatioAtTick(tick)
+		if err != nil {
+			return 0, err
+		}
+		if sqrtAtTick.Cmp(sqrtPriceX96) > 0 {
+			tick--
+			continue
+		}
+		sqrtAtNext, err := GetSqrtRatioAtTick(tick + 1)
+		if err != nil {
+			return 0, err
+		}
+		if sqrtAtNext.Cmp(sqrtPriceX96) <= 0 {
+			tick++
+			continue
+		}
 		return tick, nil
 	}
-	// 如果不满足，尝试 tick-1 和 tick+1
-	if sqrtAtTick.Cmp(sqrtPriceX96) > 0 {
-		return tick - 1, nil
-	}
-	return tick + 1, nil
 }
 
 // TickToPrice 将 tick 转换为人类可读的价格（浮点数）
