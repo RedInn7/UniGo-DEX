@@ -165,6 +165,7 @@ func main() {
 	serverConfig := api.DefaultServerConfig()
 	serverConfig.Port = getEnvInt("PORT", 8080)
 	serverConfig.RateLimitPerIP = getEnvInt("RATE_LIMIT_PER_IP", serverConfig.RateLimitPerIP)
+	serverConfig.RateLimitBurst = getEnvInt("RATE_LIMIT_BURST", serverConfig.RateLimitBurst)
 	serverConfig.MaxConcurrent = getEnvInt("MAX_CONCURRENT", serverConfig.MaxConcurrent)
 	serverConfig.DisableAccessLog = os.Getenv("ACCESS_LOG") == "off"
 	serverConfig.ManagerAddress = os.Getenv("MANAGER_ADDRESS")

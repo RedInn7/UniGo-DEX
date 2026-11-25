@@ -87,3 +87,23 @@ func TestLimitsCanBeDisabled(t *testing.T) {
 		t.Fatalf("rate limit of 5/s rejected only %d of 50 back-to-back requests", rejected)
 	}
 }
+
+// 经过完整的中间件链：突发容量用完之后，放行速率等于配置的每秒速率
+func TestRateLimitBurstThenSustainedRate(t *testing.T) {
+	s := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.RateLimitBurst, c.DisableAccessLog = 50, 80, true })
+	count := func(n int) (ok int) {
+		for i := 0; i < n; i++ {
+			if s.do(t, "GET", "/health", "", nil) == http.StatusOK {
+				ok++
+			}
+		}
+		return ok
+	}
+	if got := count(200); got < 80 || got > 84 {
+		t.Fatalf("burst let %d requests through, want about 80", got)
+	}
+	time.Sleep(500 * time.Millisecond) // 50/s × 0.5s ≈ 25 个
+	if got := count(200); got < 23 || got > 30 {
+		t.Fatalf("after 500ms %d more requests passed, want about 25", got)
+	}
+}

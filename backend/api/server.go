@@ -56,7 +56,8 @@ import (
 type ServerConfig struct {
 	Port           int
 	MaxConcurrent  int // 最大并发请求数，0 = 不限
-	RateLimitPerIP int // 每 IP 每秒请求限制，0 = 不限
+	RateLimitPerIP int // 每 IP 的持续速率（请求/秒），0 = 不限流
+	RateLimitBurst int // 每 IP 的突发容量（令牌桶大小），0 = 与速率相同
 
 	DisableAccessLog bool // 关闭逐请求的访问日志
 	ReadTimeout      time.Duration
@@ -75,6 +76,7 @@ func DefaultServerConfig() ServerConfig {
 		Port:           8080,
 		MaxConcurrent:  500,
 		RateLimitPerIP: 100,
+		RateLimitBurst: 200,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   30 * time.Second,
 		TWAPWindow:     600,
@@ -166,9 +168,13 @@ func (s *Server) Handler() http.Handler {
 	if s.config.MaxConcurrent > 0 {
 		handler = NewConcurrencyLimiter(s.config.MaxConcurrent).Middleware(handler)
 	}
-	if n := s.config.RateLimitPerIP; n > 0 {
-		// 桶容量 n、每 1/n 秒补 1 个 token，即每 IP 每秒 n 个请求
-		handler = NewRateLimiter(n, time.Second/time.Duration(n)).Middleware(handler)
+	if rate := s.config.RateLimitPerIP; rate > 0 {
+		// 令牌桶：每 1/rate 秒补 1 个令牌（持续速率 rate 请求/秒），桶里最多攒 burst 个（突发容量）
+		burst := s.config.RateLimitBurst
+		if burst <= 0 {
+			burst = rate
+		}
+		handler = NewRateLimiter(burst, time.Second/time.Duration(rate)).Middleware(handler)
 	}
 	if !s.config.DisableAccessLog {
 		handler = LoggingMiddleware(handler)
