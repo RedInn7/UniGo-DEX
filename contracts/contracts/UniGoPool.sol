@@ -175,6 +175,8 @@ contract UniGoPool is IUniGoPool {
         bytes calldata data
     ) external override lock returns (uint256 amount0, uint256 amount1) {
         require(amount > 0, "AM");
+        // 流动性变化量以 int128 记账，超过上限会被截断成负数
+        require(amount <= uint128(type(int128).max), "AO");
         // 验证 tick 范围有效
         require(tickLower < tickUpper, "TLU");
         require(tickLower >= TickMath.MIN_TICK, "TLM");
