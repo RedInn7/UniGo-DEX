@@ -9,7 +9,7 @@ import "./interfaces/IUniGoPoolCallbacks.sol";
 /// @notice 用户交互管理器
 /// @dev 用户不直接与 Pool 合约交互，而是通过 Manager 合约：
 ///      1. Manager 封装了 Pool 的回调逻辑，处理 token 转账
-///      2. Manager 提供更友好的接口（如滑点保护）
+///      2. Manager 提供更友好的接口（滑点保护 amountOutMinimum / amount0Min / amount1Min，期限保护 deadline）
 ///      3. Manager 充当 Pool 回调的接收者
 ///
 ///      【工作流程】
@@ -26,6 +26,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
         uint128 amount;        // 流动性数量
         uint256 amount0Min;    // 最少存入的 token0（滑点保护）
         uint256 amount1Min;    // 最少存入的 token1（滑点保护）
+        uint256 deadline;      // 交易截止时间（Unix 秒），超过则 revert
     }
 
     /// @notice swap 参数
@@ -35,6 +36,8 @@ contract UniGoManager is IUniGoPoolCallbacks {
         int256 amountSpecified;    // 交易数量
         uint160 sqrtPriceLimitX96; // 价格限制
         address recipient;         // 接收者地址
+        uint256 amountOutMinimum;  // 最少到手的输出 token 数量（滑点保护）
+        uint256 deadline;          // 交易截止时间（Unix 秒），超过则 revert
     }
 
     /// @notice 回调数据结构，用于在回调中传递信息
@@ -44,12 +47,20 @@ contract UniGoManager is IUniGoPoolCallbacks {
         address payer;     // 付款者地址
     }
 
+    /// @dev 期限保护：交易在内存池里滞留过久时直接作废，
+    ///      避免被延迟到对用户不利的价格再打包
+    modifier checkDeadline(uint256 deadline) {
+        require(block.timestamp <= deadline, "EXP");
+        _;
+    }
+
     /// @notice 添加流动性
     /// @param params mint 参数
     /// @return amount0 实际存入的 token0 数量
     /// @return amount1 实际存入的 token1 数量
     function mint(MintParams calldata params)
         external
+        checkDeadline(params.deadline)
         returns (uint256 amount0, uint256 amount1)
     {
         IUniGoPool pool = IUniGoPool(params.pool);
@@ -81,6 +92,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
     /// @return amount1 token1 的变化量
     function swap(SwapParams calldata params)
         external
+        checkDeadline(params.deadline)
         returns (int256 amount0, int256 amount1)
     {
         (address token0_, address token1_) = _getPoolTokens(params.pool);
@@ -96,6 +108,11 @@ contract UniGoManager is IUniGoPoolCallbacks {
                 payer: msg.sender
             }))
         );
+
+        // 滑点保护：负数表示 Pool 转出，即用户实际到手的数量
+        // 精确输出（amountSpecified < 0）时的输入上限由 sqrtPriceLimitX96 约束
+        uint256 amountOut = uint256(-(params.zeroForOne ? amount1 : amount0));
+        require(amountOut >= params.amountOutMinimum, "SLP");
     }
 
     // ==================== 回调实现 ====================
@@ -116,6 +133,11 @@ contract UniGoManager is IUniGoPoolCallbacks {
         if (amount1Owed > 0) {
             IERC20(decoded.token1).transferFrom(decoded.payer, msg.sender, amount1Owed);
         }
+    }
+
+    /// @dev flash 回调 — Manager 不发起闪电贷，直接 revert
+    function uniGoFlashCallback(uint256, uint256, bytes calldata) external pure override {
+        revert("NOT_SUPPORTED");
     }
 
     /// @inheritdoc IUniGoPoolCallbacks
