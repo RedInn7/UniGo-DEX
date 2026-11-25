@@ -57,7 +57,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
     struct SwapParams {
         address pool;              // Pool 合约地址
         bool zeroForOne;           // 交易方向
-        int256 amountSpecified;    // 交易数量（正=精确输入，负=精确输出）
+        int256 amountSpecified;    // 输入 token 数量，必须为正（精确输出请用 exactOutputSingle）
         uint160 sqrtPriceLimitX96; // 价格限制
         address recipient;         // 接收者地址
         uint256 amountOutMinimum;  // 最少到手的输出 token 数量（滑点保护）
@@ -134,7 +134,7 @@ contract UniGoManager is IUniGoPoolCallbacks {
 
     // ==================== 代币交换 ====================
 
-    /// @notice 单池代币交换
+    /// @notice 单池代币交换（精确输入）
     /// @param params swap 参数
     /// @return amount0 token0 的变化量
     /// @return amount1 token1 的变化量
@@ -143,6 +143,8 @@ contract UniGoManager is IUniGoPoolCallbacks {
         checkDeadline(params.deadline)
         returns (int256 amount0, int256 amount1)
     {
+        // 只接受精确输入：精确输出在这里没有输入上限保护，必须走 exactOutputSingle
+        require(params.amountSpecified > 0, "AS");
         CallbackData memory data = _verifyPool(params.pool, msg.sender);
 
         (amount0, amount1) = IUniGoPool(params.pool).swap(
@@ -154,7 +156,6 @@ contract UniGoManager is IUniGoPoolCallbacks {
         );
 
         // 滑点保护：负数表示 Pool 转出，即用户实际到手的数量
-        // 精确输出需要限制输入上限时，使用 exactOutputSingle
         uint256 amountOut = uint256(-(params.zeroForOne ? amount1 : amount0));
         require(amountOut >= params.amountOutMinimum, "SLP");
     }
