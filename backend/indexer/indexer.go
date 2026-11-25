@@ -199,6 +199,14 @@ func (idx *Indexer) pollBlocks(ctx context.Context) {
 	}
 }
 
+// SyncOnce 同步执行一轮追块：从 next 开始追到最新区块（最多 MaxBlockRange 个），返回下一个待处理的区块号
+//
+// 正常运行时由 Start 启动的轮询协程调用；压测和工具需要精确控制追块时机时可以直接调用，
+// 但不要与 Start 同时使用。
+func (idx *Indexer) SyncOnce(ctx context.Context, next uint64) uint64 {
+	return idx.syncOnce(ctx, next)
+}
+
 // syncOnce 从 next 开始追到最新区块，返回下一个待处理的区块号
 func (idx *Indexer) syncOnce(ctx context.Context, next uint64) uint64 {
 	latest, err := idx.source.LatestBlock(ctx)
