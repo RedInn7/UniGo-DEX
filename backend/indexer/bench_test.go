@@ -42,8 +42,12 @@ func (c *memoryChain) BlockByNumber(_ context.Context, number uint64) (*indexer.
 	return c.blocks[number], nil
 }
 
-func (c *memoryChain) BlockEvents(_ context.Context, block *indexer.BlockInfo) ([]interface{}, error) {
-	return c.events[block.Number], nil
+func (c *memoryChain) BlockEvents(_ context.Context, blocks []*indexer.BlockInfo) ([][]interface{}, error) {
+	events := make([][]interface{}, len(blocks))
+	for i, block := range blocks {
+		events[i] = c.events[block.Number]
+	}
+	return events, nil
 }
 
 // buildChain 区块 0 创建并初始化 benchPools 个池子，之后每个区块 benchEventsPerBlock 个事件：

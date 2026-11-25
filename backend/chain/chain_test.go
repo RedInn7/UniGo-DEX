@@ -143,11 +143,11 @@ func (e *env) events() ([]interface{}, *indexer.BlockInfo) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	events, err := e.client.BlockEvents(ctx, block)
+	events, err := e.client.BlockEvents(ctx, []*indexer.BlockInfo{block})
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return events, block
+	return events[0], block
 }
 
 func TestBlockHeaders(t *testing.T) {
@@ -266,9 +266,56 @@ func TestDecodePoolCreatedOnlyFromFactory(t *testing.T) {
 	other := NewClient(e.backend.Client(), userA)
 	latest, _ := other.LatestBlock(context.Background())
 	block, _ := other.BlockByNumber(context.Background(), latest)
-	events, err := other.BlockEvents(context.Background(), block)
+	fromOther, err := other.BlockEvents(context.Background(), []*indexer.BlockInfo{block})
+	events = fromOther[0]
 	if err != nil || len(events) != 0 {
 		t.Fatalf("events = %v, err = %v; want none", events, err)
+	}
+}
+
+// 一次查询拉取一段区块：事件按区块分好；区块哈希对不上（读取期间重组）时报错而不是张冠李戴
+func TestBlockEventsRange(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	e.emitSwap(userA, userB, 1, -1, 11)
+	e.backend.Commit() // 区块 2：1 笔
+	e.backend.Commit() // 区块 3：空
+	e.emitSwap(userA, userB, 2, -2, 22)
+	e.emitSwap(userB, userA, 3, -3, 33)
+	e.backend.Commit() // 区块 4：2 笔
+
+	var blocks []*indexer.BlockInfo
+	for n := uint64(1); n <= 4; n++ {
+		block, err := e.client.BlockByNumber(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks = append(blocks, block)
+	}
+	events, err := e.client.BlockEvents(ctx, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || len(events[0]) != 0 || len(events[1]) != 1 || len(events[2]) != 0 || len(events[3]) != 2 {
+		t.Fatalf("events per block: %d %d %d %d", len(events[0]), len(events[1]), len(events[2]), len(events[3]))
+	}
+	first, last := events[1][0].(*indexer.SwapEvent), events[3][1].(*indexer.SwapEvent)
+	if first.Tick != 11 || first.BlockNumber != 2 || first.Timestamp != uint64(blocks[1].Timestamp.Unix()) {
+		t.Fatalf("block 2 swap: %+v", first)
+	}
+	if last.Tick != 33 || last.BlockNumber != 4 || last.LogIndex != 1 || last.Timestamp != uint64(blocks[3].Timestamp.Unix()) {
+		t.Fatalf("block 4 second swap: %+v", last)
+	}
+
+	// 调用方手里的区块 4 已经不是链上的那个（哈希不同）：必须报 ErrReorged
+	stale := *blocks[3]
+	stale.Hash = blocks[2].Hash
+	if _, err := e.client.BlockEvents(ctx, []*indexer.BlockInfo{blocks[2], &stale}); !errors.Is(err, ErrReorged) {
+		t.Fatalf("err = %v, want ErrReorged", err)
+	}
+	if events, err := e.client.BlockEvents(ctx, nil); err != nil || len(events) != 0 {
+		t.Fatalf("empty range: %v %v", events, err)
 	}
 }
 

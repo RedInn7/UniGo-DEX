@@ -39,8 +39,12 @@ func (c *fakeChain) BlockByNumber(ctx context.Context, number uint64) (*BlockInf
 	return c.blocks[number], nil
 }
 
-func (c *fakeChain) BlockEvents(ctx context.Context, block *BlockInfo) ([]interface{}, error) {
-	return c.events[block.Hash], nil
+func (c *fakeChain) BlockEvents(ctx context.Context, blocks []*BlockInfo) ([][]interface{}, error) {
+	events := make([][]interface{}, len(blocks))
+	for i, block := range blocks {
+		events[i] = c.events[block.Hash]
+	}
+	return events, nil
 }
 
 type recorder struct {

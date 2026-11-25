@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"sync"
@@ -52,8 +53,9 @@ type ChainSource interface {
 	LatestBlock(ctx context.Context) (uint64, error)
 	// BlockByNumber 返回指定高度的区块信息（hash / parentHash / timestamp）
 	BlockByNumber(ctx context.Context, number uint64) (*BlockInfo, error)
-	// BlockEvents 返回该区块内已解析的事件，按 logIndex 升序
-	BlockEvents(ctx context.Context, block *BlockInfo) ([]interface{}, error)
+	// BlockEvents 返回一段连续区块内已解析的事件：结果与 blocks 一一对应，每个区块内按 logIndex 升序。
+	// 实现方必须保证事件确实属于 blocks 里的那个区块（核对区块哈希），对不上时返回错误。
+	BlockEvents(ctx context.Context, blocks []*BlockInfo) ([][]interface{}, error)
 }
 
 // SwapListener 订阅 Swap 事件流（K 线聚合、三明治检测等）
@@ -78,7 +80,7 @@ type IndexerConfig struct {
 	ConfirmationBlocks uint64
 	// PollInterval 轮询间隔
 	PollInterval time.Duration
-	// MaxBlockRange 单次轮询最多处理的区块数
+	// MaxBlockRange 单次日志查询（eth_getLogs）覆盖的最大区块数
 	MaxBlockRange uint64
 }
 
@@ -88,7 +90,7 @@ func DefaultConfig() IndexerConfig {
 		RPCURL:             "http://127.0.0.1:8545",
 		ConfirmationBlocks: 12, // 以太坊约 12 个区块确认
 		PollInterval:       2 * time.Second,
-		MaxBlockRange:      1000,
+		MaxBlockRange:      500, // 多数节点服务商对单次 eth_getLogs 的区块范围有限制
 	}
 }
 
@@ -185,7 +187,7 @@ func (idx *Indexer) pollBlocks(ctx context.Context) {
 	}
 }
 
-// SyncOnce 同步执行一轮追块：从 next 开始追到最新区块（最多 MaxBlockRange 个），返回下一个待处理的区块号
+// SyncOnce 同步执行一轮追块：从 next 开始追到最新区块，返回下一个待处理的区块号
 //
 // 正常运行时由 Start 启动的轮询协程调用；压测和工具需要精确控制追块时机时可以直接调用，
 // 但不要与 Start 同时使用。
@@ -193,21 +195,23 @@ func (idx *Indexer) SyncOnce(ctx context.Context, next uint64) uint64 {
 	return idx.syncOnce(ctx, next)
 }
 
-// syncOnce 从 next 开始追到最新区块，返回下一个待处理的区块号
+// syncOnce 从 next 开始分批追到最新区块，返回下一个待处理的区块号
 func (idx *Indexer) syncOnce(ctx context.Context, next uint64) uint64 {
 	latest, err := idx.source.LatestBlock(ctx)
 	if err != nil {
 		logging.L(ctx).Warn("获取最新区块号失败", "err", err)
 		return next
 	}
-	if limit := next + idx.config.MaxBlockRange; idx.config.MaxBlockRange > 0 && latest >= limit {
-		latest = limit - 1
-	}
 
+	batch := idx.config.MaxBlockRange
+	if batch == 0 {
+		batch = 1
+	}
 	for next <= latest && ctx.Err() == nil {
-		n, err := idx.processBlock(ctx, next)
+		to := min(latest, next+batch-1)
+		n, err := idx.processRange(ctx, next, to)
 		if err != nil {
-			logging.L(ctx).Warn("处理区块失败", "block", next, "err", err)
+			logging.L(ctx).Warn("处理区块失败", "from", next, "to", to, "err", err)
 			break
 		}
 		next = n
@@ -215,71 +219,85 @@ func (idx *Indexer) syncOnce(ctx context.Context, next uint64) uint64 {
 	return next
 }
 
-// processBlock 处理单个区块，返回下一个待处理的区块号
+// processRange 处理一段连续的区块 [from, to]，返回下一个待处理的区块号
 //
 // 核心流程：
-//  1. 获取区块信息（hash, parentHash）
-//  2. 验证 parentHash 与已知的前一个区块是否一致（Reorg 检测）
-//  3. 如果检测到 Reorg，回滚并返回分叉点，下一轮从分叉点重新索引
-//  4. 获取并处理该区块中的相关事件
-func (idx *Indexer) processBlock(ctx context.Context, blockNumber uint64) (uint64, error) {
-	block, err := idx.source.BlockByNumber(ctx, blockNumber)
-	if err != nil {
-		return blockNumber, err
+//  1. 逐个获取区块头（hash, parentHash, timestamp）
+//  2. 验证第一个区块的 parentHash 与本地记录的上一个区块是否一致（Reorg 检测）；
+//     检测到 Reorg 就回滚并返回分叉点，下一轮从分叉点重新索引
+//  3. 一次性拉取整段区块的事件（一次 eth_getLogs），按区块分好
+//  4. 按区块顺序应用事件、记录哈希链
+//
+// 区块头和事件是分两步读的，中间链可能重组。数据源会核对每条日志所属区块的哈希与
+// 第 1 步拿到的区块头一致，不一致就报错，这一段整体作废、下一轮重读，不会把两条分叉上的数据拼在一起。
+func (idx *Indexer) processRange(ctx context.Context, from, to uint64) (uint64, error) {
+	blocks := make([]*BlockInfo, 0, to-from+1)
+	for n := from; n <= to; n++ {
+		block, err := idx.source.BlockByNumber(ctx, n)
+		if err != nil {
+			return from, err
+		}
+		// 读区块头的过程中链重组了：这一段前后接不上，作废重读
+		if len(blocks) > 0 && block.ParentHash != blocks[len(blocks)-1].Hash {
+			return from, fmt.Errorf("区块 %d 与前一个区块接不上，链在读取期间发生了重组", n)
+		}
+		blocks = append(blocks, block)
 	}
 
 	// === Reorg 检测 ===
-	if blockNumber > 0 {
+	if from > 0 {
 		idx.blockHistoryMu.RLock()
-		prevBlock, hasPrev := idx.blockHistory[blockNumber-1]
+		prevBlock, hasPrev := idx.blockHistory[from-1]
 		idx.blockHistoryMu.RUnlock()
 
-		if hasPrev && block.ParentHash != prevBlock.Hash {
+		if hasPrev && blocks[0].ParentHash != prevBlock.Hash {
 			logging.L(ctx).Warn("检测到 Reorg：parentHash 与本地记录的上一个区块不一致",
-				"block", blockNumber, "expected_parent", prevBlock.Hash, "actual_parent", block.ParentHash)
+				"block", from, "expected_parent", prevBlock.Hash, "actual_parent", blocks[0].ParentHash)
 
-			forkBlock, err := idx.findForkBlock(ctx, blockNumber-1)
+			forkBlock, err := idx.findForkBlock(ctx, from-1)
 			if err != nil {
-				return blockNumber, err
+				return from, err
 			}
 			idx.handleReorg(forkBlock)
 			return forkBlock, nil
 		}
 	}
 
-	events, err := idx.source.BlockEvents(ctx, block)
+	events, err := idx.source.BlockEvents(ctx, blocks)
 	if err != nil {
-		return blockNumber, err
-	}
-	for _, event := range events {
-		idx.handleEvent(event)
+		return from, err
 	}
 
-	// 记录区块信息
-	idx.blockHistoryMu.Lock()
-	idx.blockHistory[blockNumber] = block
-	// 清理过旧的历史
-	if blockNumber > idx.maxHistoryDepth {
-		delete(idx.blockHistory, blockNumber-idx.maxHistoryDepth)
+	for i, block := range blocks {
+		for _, event := range events[i] {
+			idx.handleEvent(event)
+		}
+
+		// 记录区块信息，清理过旧的历史
+		idx.blockHistoryMu.Lock()
+		idx.blockHistory[block.Number] = block
+		if block.Number > idx.maxHistoryDepth {
+			delete(idx.blockHistory, block.Number-idx.maxHistoryDepth)
+		}
+		idx.blockHistoryMu.Unlock()
+
+		// 超出回滚窗口的变更不再需要撤销
+		drop := 0
+		for drop < len(idx.undoLog) && idx.undoLog[drop].block+idx.maxHistoryDepth < block.Number {
+			drop++
+		}
+		idx.undoLog = idx.undoLog[drop:]
+
+		// 更新统计
+		idx.statsMu.Lock()
+		idx.stats.BlocksProcessed++
+		idx.stats.LastBlockNumber = block.Number
+		idx.stats.LastBlockTime = block.Timestamp
+		idx.statsMu.Unlock()
+		metrics.IndexerBlocksProcessed.Inc()
 	}
-	idx.blockHistoryMu.Unlock()
 
-	// 超出回滚窗口的变更不再需要撤销
-	drop := 0
-	for drop < len(idx.undoLog) && idx.undoLog[drop].block+idx.maxHistoryDepth < blockNumber {
-		drop++
-	}
-	idx.undoLog = idx.undoLog[drop:]
-
-	// 更新统计
-	idx.statsMu.Lock()
-	idx.stats.BlocksProcessed++
-	idx.stats.LastBlockNumber = blockNumber
-	idx.stats.LastBlockTime = block.Timestamp
-	idx.statsMu.Unlock()
-	metrics.IndexerBlocksProcessed.Inc()
-
-	return blockNumber + 1, nil
+	return to + 1, nil
 }
 
 // findForkBlock 从 from 向前比对本地哈希链与链上区块，返回第一个需要重新索引的区块号
