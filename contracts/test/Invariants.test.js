@@ -21,6 +21,10 @@ const {
  * 1. 偿付能力：池子两种 token 的余额 ≥ 所有 position 的应得本金 + 未领手续费 + 已结算未提取数量
  * 2. 活跃流动性：pool.liquidity 等于所有覆盖当前 tick 的 position 流动性之和
  * 3. 手续费累计值 feeGrowthGlobal 单调不减
+ * 4. 每个 tick 的 liquidityGross / liquidityNet 与所有 position 的流动性吻合，且不超过单 tick 上限
+ *
+ * 操作集合里包含针对单 tick 流动性上限的攻击：在远离现价的极端区间反复 mint 接近
+ * int128 上限的流动性，试图让 liquidityNet 回绕；这些 mint 要么被拒绝，要么如实记账
  * 最后所有 LP 全部撤出并提取，池子必须付得出每一笔，且只剩舍入产生的零头
  *
  * 可用环境变量 INVARIANT_SEED / INVARIANT_STEPS 换种子或加长步数
@@ -41,7 +45,14 @@ describe("不变量随机测试", function () {
     [-300, -60],
     [540, 1200],
     [-1200, -540],
+    // 远离现价的极端区间：本金几乎为零，是堆积巨额流动性成本最低的地方
+    [887100, 887160],
+    [-887160, -887100],
   ];
+  // 极端区间在 RANGES 里的下标
+  const EXTREME_RANGES = [8, 9];
+  // 接近 int128 上限的流动性
+  const NEAR_INT128_MAX = 2n ** 127n - 1n;
 
   // mulberry32：固定种子的 32 位伪随机数发生器
   function createRandom(seed) {
@@ -93,7 +104,10 @@ describe("不变量随机测试", function () {
     const random = createRandom(SEED);
     // 链下模型：记录每个 position 的流动性，key 为 "actor 下标:区间下标"
     const model = new Map();
-    const counts = { mint: 0, burn: 0, swapIn: 0, swapOut: 0, flash: 0, collect: 0 };
+    const counts = { mint: 0, burn: 0, swapIn: 0, swapOut: 0, flash: 0, collect: 0, hugeMint: 0 };
+    let hugeMintAccepted = 0;
+    let hugeMintRejected = 0;
+    const maxLiquidityPerTick = await pool.maxLiquidityPerTick();
     const crossed = new Set();
 
     async function mint(actorIndex, rangeIndex, amount) {
@@ -118,7 +132,26 @@ describe("不变量随机测试", function () {
 
     const actions = {
       async mint() {
-        await mint(1 + random.int(2), 1 + random.int(RANGES.length - 1), random.amount(1, 500));
+        // 普通 mint 只用常规区间（极端区间留给 hugeMint）
+        await mint(1 + random.int(2), 1 + random.int(EXTREME_RANGES[0] - 1), random.amount(1, 500));
+      },
+
+      // 攻击：在极端区间 mint 巨额流动性，试图让 tick 的 liquidityNet 回绕
+      async hugeMint() {
+        const amount = random.pick([
+          NEAR_INT128_MAX,
+          maxLiquidityPerTick,
+          maxLiquidityPerTick / 2n + 1n,
+          maxLiquidityPerTick / 3n,
+        ]);
+        try {
+          await mint(1 + random.int(2), random.pick(EXTREME_RANGES), amount);
+          hugeMintAccepted++;
+        } catch (error) {
+          // 只允许因为超过单 tick 上限而被拒绝
+          if (!error.message.includes("'LO'")) throw error;
+          hugeMintRejected++;
+        }
       },
 
       async burn() {
@@ -189,6 +222,7 @@ describe("不变量随机测试", function () {
       ...Array(2).fill("swapOut"),
       ...Array(2).fill("flash"),
       ...Array(3).fill("collect"),
+      ...Array(2).fill("hugeMint"),
     ];
 
     // ---------- 不变量检查 ----------
@@ -257,6 +291,23 @@ describe("不变量随机测试", function () {
         claims1 += (sub256(inside1, position.feeGrowthInside1LastX128) * liquidity) / Q128;
       }
 
+      // 4. 每个 tick 的流动性统计与 position 吻合，且不超过上限
+      const expectedGross = new Map();
+      const expectedNet = new Map();
+      for (const [key, liquidity] of model) {
+        const [tickLower, tickUpper] = RANGES[Number(key.split(":")[1])];
+        expectedGross.set(tickLower, (expectedGross.get(tickLower) || 0n) + liquidity);
+        expectedGross.set(tickUpper, (expectedGross.get(tickUpper) || 0n) + liquidity);
+        expectedNet.set(tickLower, (expectedNet.get(tickLower) || 0n) + liquidity);
+        expectedNet.set(tickUpper, (expectedNet.get(tickUpper) || 0n) - liquidity);
+      }
+      for (const [t, gross] of expectedGross) {
+        const info = await readTick(t);
+        expect(info.liquidityGross, `${label} tick ${t} liquidityGross`).to.equal(gross);
+        expect(info.liquidityNet, `${label} tick ${t} liquidityNet`).to.equal(expectedNet.get(t));
+        expect(info.liquidityGross, `${label} tick ${t} 超过上限`).to.be.lte(maxLiquidityPerTick);
+      }
+
       // 2. 活跃流动性等于覆盖当前 tick 的 position 之和
       expect(await pool.liquidity(), `${label} 活跃流动性`).to.equal(activeLiquidity);
 
@@ -285,6 +336,9 @@ describe("不变量随机测试", function () {
       expect(count, `${action} 没有被执行`).to.be.gt(0);
     }
     expect(crossed.size, "价格没有越过足够多的区间边界").to.be.gte(6);
+    // 攻击性的巨额 mint 既有被上限挡住的，也有在上限以内如实记账的
+    expect(hugeMintRejected, "没有巨额 mint 被上限拒绝").to.be.gt(0);
+    expect(hugeMintAccepted, "没有巨额 mint 在上限以内成功").to.be.gt(0);
 
     // ---------- 收尾：所有 LP 全部撤出并提取 ----------
 

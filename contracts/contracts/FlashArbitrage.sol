@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IUniGoFactory.sol";
 import "./interfaces/IUniGoPool.sol";
 import "./interfaces/IUniGoPoolCallbacks.sol";
@@ -24,6 +25,8 @@ import "./lib/TickMath.sol";
 ///
 ///      套利的副作用是两个池子的价格向彼此收敛，这正是多池市场保持价格一致的机制
 contract FlashArbitrage is IUniGoPoolCallbacks {
+    using SafeERC20 for IERC20;
+
     /// @notice 套利参数
     struct ArbitrageParams {
         address lender;        // 提供闪电贷的池子
@@ -80,7 +83,7 @@ contract FlashArbitrage is IUniGoPoolCallbacks {
 
         // 回调里已还清贷款，合约里剩下的都是利润
         profit = IERC20(params.borrowToken).balanceOf(address(this));
-        IERC20(params.borrowToken).transfer(msg.sender, profit);
+        IERC20(params.borrowToken).safeTransfer(msg.sender, profit);
 
         emit Arbitrage(msg.sender, params.borrowToken, params.amount, profit);
     }
@@ -105,7 +108,7 @@ contract FlashArbitrage is IUniGoPoolCallbacks {
         uint256 balance = IERC20(params.borrowToken).balanceOf(address(this));
         require(balance > owed && balance - owed >= params.minProfit, "NP");
 
-        IERC20(params.borrowToken).transfer(msg.sender, owed);
+        IERC20(params.borrowToken).safeTransfer(msg.sender, owed);
 
         // 套利结束，不再接受任何回调
         _expectedCaller = address(0);
@@ -117,10 +120,10 @@ contract FlashArbitrage is IUniGoPoolCallbacks {
         require(msg.sender == _expectedCaller, "CB");
 
         if (amount0Delta > 0) {
-            IERC20(IUniGoPool(msg.sender).token0()).transfer(msg.sender, uint256(amount0Delta));
+            IERC20(IUniGoPool(msg.sender).token0()).safeTransfer(msg.sender, uint256(amount0Delta));
         }
         if (amount1Delta > 0) {
-            IERC20(IUniGoPool(msg.sender).token1()).transfer(msg.sender, uint256(amount1Delta));
+            IERC20(IUniGoPool(msg.sender).token1()).safeTransfer(msg.sender, uint256(amount1Delta));
         }
     }
 
@@ -143,6 +146,9 @@ contract FlashArbitrage is IUniGoPoolCallbacks {
             zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
             ""
         );
+
+        // 流动性不足时输入吃不完，剩余的 token 会滞留在合约里被后来的调用者拿走，整笔作废
+        require(uint256(zeroForOne ? amount0 : amount1) == amountIn, "PF");
 
         amountOut = uint256(-(zeroForOne ? amount1 : amount0));
     }
