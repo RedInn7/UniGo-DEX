@@ -55,10 +55,12 @@ import (
 // ServerConfig API 服务器配置
 type ServerConfig struct {
 	Port           int
-	MaxConcurrent  int // 最大并发请求数
-	RateLimitPerIP int // 每 IP 每秒请求限制
-	ReadTimeout    time.Duration
-	WriteTimeout   time.Duration
+	MaxConcurrent  int // 最大并发请求数，0 = 不限
+	RateLimitPerIP int // 每 IP 每秒请求限制，0 = 不限
+
+	DisableAccessLog bool // 关闭逐请求的访问日志
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
 
 	ManagerAddress string // UniGoManager 地址：待签名交易的目标，也是 EIP-712 的 verifyingContract
 	QuoterAddress  string // UniGoQuoter 地址：配置后对链下报价做链上一致性抽检
@@ -154,17 +156,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /metrics", metrics.DefaultRegistry.Handler())
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// 构建中间件链
-	concLimiter := NewConcurrencyLimiter(s.config.MaxConcurrent)
-	rateLimiter := NewRateLimiter(s.config.RateLimitPerIP, time.Second)
-
-	return CORSMiddleware(
-		LoggingMiddleware(
-			rateLimiter.Middleware(
-				concLimiter.Middleware(mux),
-			),
-		),
-	)
+	// 构建中间件链：CORS → Logging → RateLimit → ConcurrencyLimit → Handler
+	// 两个限制都可以用 0 关闭（压测吞吐上限、或由前置网关负责限流时使用）
+	var handler http.Handler = mux
+	if s.config.MaxConcurrent > 0 {
+		handler = NewConcurrencyLimiter(s.config.MaxConcurrent).Middleware(handler)
+	}
+	if n := s.config.RateLimitPerIP; n > 0 {
+		// 桶容量 n、每 1/n 秒补 1 个 token，即每 IP 每秒 n 个请求
+		handler = NewRateLimiter(n, time.Second/time.Duration(n)).Middleware(handler)
+	}
+	if !s.config.DisableAccessLog {
+		handler = LoggingMiddleware(handler)
+	}
+	return CORSMiddleware(handler)
 }
 
 // Start 启动 HTTP 服务器

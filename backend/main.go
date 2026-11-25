@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -70,7 +71,12 @@ func main() {
 	idxConfig.RPCURL = os.Getenv("RPC_URL")
 	idxConfig.FactoryAddress = os.Getenv("FACTORY_ADDRESS")
 	idxConfig.StartBlock = uint64(getEnvInt("START_BLOCK", 0))
-	idxConfig.ConfirmationBlocks = uint64(getEnvInt("CONFIRMATION_BLOCKS", int(idxConfig.ConfirmationBlocks)))
+	if n := getEnvInt("CONFIRMATION_BLOCKS", 0); n > 0 {
+		idxConfig.ConfirmationBlocks = uint64(n)
+	}
+	if ms := getEnvInt("POLL_INTERVAL_MS", 0); ms > 0 {
+		idxConfig.PollInterval = time.Duration(ms) * time.Millisecond
+	}
 
 	// 配置了 RPC_URL 且节点连得上就用真实链，否则用模拟源，保证不配节点也能启动
 	var (
@@ -158,6 +164,9 @@ func main() {
 	log.Println("[启动] 初始化 API 服务器...")
 	serverConfig := api.DefaultServerConfig()
 	serverConfig.Port = getEnvInt("PORT", 8080)
+	serverConfig.RateLimitPerIP = getEnvInt("RATE_LIMIT_PER_IP", serverConfig.RateLimitPerIP)
+	serverConfig.MaxConcurrent = getEnvInt("MAX_CONCURRENT", serverConfig.MaxConcurrent)
+	serverConfig.DisableAccessLog = os.Getenv("ACCESS_LOG") == "off"
 	serverConfig.ManagerAddress = os.Getenv("MANAGER_ADDRESS")
 	serverConfig.QuoterAddress = os.Getenv("QUOTER_ADDRESS")
 	serverConfig.TWAPWindow = uint32(getEnvInt("TWAP_WINDOW", int(serverConfig.TWAPWindow)))
@@ -239,15 +248,10 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getEnvInt 获取整数环境变量
+// getEnvInt 获取整数环境变量；未设置或不是整数时用默认值
 func getEnvInt(key string, defaultValue int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultValue
-	}
-	var result int
-	fmt.Sscanf(v, "%d", &result)
-	if result == 0 {
+	result, err := strconv.Atoi(os.Getenv(key))
+	if err != nil {
 		return defaultValue
 	}
 	return result

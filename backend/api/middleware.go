@@ -78,6 +78,8 @@ type tokenBucket struct {
 }
 
 // NewRateLimiter 创建限流器
+//
+// maxTokens 是桶容量（允许的突发量），refillRate 是补充 1 个 token 的间隔。
 func NewRateLimiter(maxTokens int, refillRate time.Duration) *RateLimiter {
 	rl := &RateLimiter{
 		buckets:    make(map[string]*tokenBucket),
@@ -111,7 +113,8 @@ func (rl *RateLimiter) Allow(ip string) bool {
 		if bucket.tokens > rl.maxTokens {
 			bucket.tokens = rl.maxTokens
 		}
-		bucket.lastTime = time.Now()
+		// 只推进已经兑换成 token 的那部分时间，不足一个 token 的零头留到下次
+		bucket.lastTime = bucket.lastTime.Add(time.Duration(refilled) * rl.refillRate)
 	}
 
 	if bucket.tokens <= 0 {
