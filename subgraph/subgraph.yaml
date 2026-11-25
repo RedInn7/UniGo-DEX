@@ -10,7 +10,7 @@ dataSources:
     network: localhost
     source:
       # scripts/deploy.js 在本地节点上首个部署的合约地址
-      address: "0x5FbDB2315678afecb6f798fbb0E5C8a9D2D9a8E3"
+      address: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
       abi: UniGoFactory
       startBlock: 0
     mapping:
