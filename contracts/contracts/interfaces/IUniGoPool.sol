@@ -82,6 +82,20 @@ interface IUniGoPool {
         uint256 paid1
     );
 
+    /// @notice 池子初始化事件
+    /// @param sqrtPriceX96 初始价格（Q64.96 格式）
+    /// @param tick 初始价格对应的 tick
+    event Initialize(uint160 sqrtPriceX96, int24 tick);
+
+    /// @notice 池子的 token0 地址（地址较小的 token）
+    function token0() external view returns (address);
+
+    /// @notice 池子的 token1 地址（地址较大的 token）
+    function token1() external view returns (address);
+
+    /// @notice 手续费率（以百万分之一为单位）
+    function fee() external view returns (uint24);
+
     /// @notice 初始化池子
     /// @param sqrtPriceX96 初始价格（Q64.96 格式）
     function initialize(uint160 sqrtPriceX96) external;

@@ -47,11 +47,11 @@ contract UniGoPool is IUniGoPool {
     // ==================== 不可变状态 ====================
 
     /// @notice 池子的 token0 地址（地址较小的 token）
-    address public immutable token0;
+    address public immutable override token0;
     /// @notice 池子的 token1 地址（地址较大的 token）
-    address public immutable token1;
+    address public immutable override token1;
     /// @notice 手续费率（以百万分之一为单位，如 3000 = 0.3%）
-    uint24 public immutable fee;
+    uint24 public immutable override fee;
     /// @notice Tick 间距，与费率关联（费率越高间距越大，减少 gas 消耗）
     int24 public immutable tickSpacing;
     /// @notice 创建此池的工厂合约地址
@@ -155,6 +155,8 @@ contract UniGoPool is IUniGoPool {
             tick: tick,
             unlocked: true
         });
+
+        emit Initialize(sqrtPriceX96, tick);
     }
 
     // ==================== 添加流动性 ====================
