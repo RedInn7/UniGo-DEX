@@ -1146,8 +1146,9 @@ if exactIn && !reachedTarget {
 | 能力 | 方法 | 用到它的模块 |
 |------|------|-------------|
 | 区块头（hash / parentHash / timestamp） | `LatestBlock` `BlockByNumber` | 索引器 |
-| 按区块拉日志并解码成事件 | `BlockEvents` | 索引器 |
+| 按区块范围批量拉日志并解码成事件 | `BlockEvents` | 索引器 |
 | 合约只读调用 | `Slot0` `PoolLiquidity` `TWAP` `QuoteExactInput` | TWAP 校验、链上报价抽检 |
+| Chainlink 聚合器、ERC20 余额 | `ChainlinkDecimals` `ChainlinkLatestRound` `TokenBalance` | 价格校验、套利扫描 |
 | 调用数据编码 | `EncodePath` `EncodeSwap` `EncodeExactInput` `EncodeExactOutputSingle` `EncodeArbitrage` | 待签名交易、套利扫描 |
 | 交易 | `SendRawTransaction` `InspectRawTx` `TxStatus` `EstimateGas` | 提交交易、状态查询 |
 | EIP-1559 费用 | `Fees` | Gas 成本评估 |
@@ -1165,7 +1166,7 @@ if exactIn && !reachedTarget {
 var (
     //go:embed UniGoPool.json
     poolJSON string
-    // ... UniGoFactory / UniGoManager / UniGoQuoter / FlashArbitrage
+    // ... UniGoFactory / UniGoManager / UniGoQuoter / FlashArbitrage / AggregatorV3Interface / IERC20
 
     Pool    = mustParse(poolJSON)
     Factory = mustParse(factoryJSON)
@@ -1197,7 +1198,7 @@ var eventTopics = func() []common.Hash {
 
 日志的 `topics[0]` 是事件签名哈希，indexed 参数在 `topics[1:]`，其余参数 ABI 编码在 `data` 里。解码时有三个防御点：
 
-- **按区块哈希过滤**（`FilterQuery.BlockHash`）：区块已被 Reorg 掉时节点会报错，而不是返回另一条分叉上的日志
+- **核对日志的区块哈希**：日志按区块号范围批量拉取，拿到的是节点当前主链上的日志，所以逐条核对 `blockHash` 与索引器手里的区块头一致；对不上说明这期间链重组了，返回 `ErrReorged` 让调用方整段重读
 - **只信任 Factory 发出的 `PoolCreated`**：否则任何合约都能发一条同签名的日志伪造池子
 - **畸形日志跳过不中断**：签名相同但内容解不出来的日志记一条警告后跳过，不能卡住索引
 
@@ -1246,12 +1247,34 @@ func call[T any](c *Client, fn func() (T, error)) (T, error) {
 type ChainSource interface {
     LatestBlock(ctx context.Context) (uint64, error)
     BlockByNumber(ctx context.Context, number uint64) (*BlockInfo, error)   // hash / parentHash / timestamp
-    BlockEvents(ctx context.Context, block *BlockInfo) ([]interface{}, error) // 已解码，按 logIndex 升序
+    // 一段连续区块内已解码的事件：结果与 blocks 一一对应，每个区块内按 logIndex 升序
+    BlockEvents(ctx context.Context, blocks []*BlockInfo) ([][]interface{}, error)
 }
 ```
 
 - 配置了 `RPC_URL` 和 `FACTORY_ADDRESS` 且节点连得上：数据源是 `chain.Client`，区块哈希、父哈希、事件全部来自真实节点
 - 否则：数据源是内置的模拟源（`sim_source.go`），只出父哈希衔接的空区块，保证后端不配节点也能启动
+
+**按区块范围批量拉取**
+
+每个区块发一次 `eth_getLogs` 的话，追 N 个区块就要 2N 次 RPC 往返（区块头 + 日志）。索引器把待追的区块按 `MaxBlockRange`（默认 500，多数节点服务商对单次 `eth_getLogs` 的范围有限制）分段，每段：
+
+1. 逐个取区块头，并检查段内每个区块的 `parentHash` 与前一个接得上
+2. 第一个区块的 `parentHash` 与本地记录的上一个区块比对（Reorg 检测，见下）
+3. **一次** `eth_getLogs` 拉取整段的事件，按区块分好
+4. 按区块顺序应用事件、记录哈希链
+
+区块头和日志是分两步读的，中间链可能重组。数据源逐条核对日志所属区块的哈希与第 1 步拿到的区块头一致，不一致就报错，这一段整体作废、下一轮重读，不会把两条分叉上的数据拼在一起：
+
+```go
+// chain/events.go — BlockEvents
+block := blocks[lg.BlockNumber-first]
+if lg.BlockHash.Hex() != block.Hash {
+    return nil, fmt.Errorf("%w: 区块 %d", ErrReorged, lg.BlockNumber)
+}
+```
+
+对本地 Hardhat 节点从创世块追到链头（680 个区块、3036 个事件，带全部订阅者）中位耗时 193 ms，约 3,517 区块/秒（见[压测](#压测)）。
 
 **事件驱动的状态重建**
 
@@ -1341,7 +1364,7 @@ type SwapListener interface {
 
 `main.go` 里注册了四个订阅者：预言机的池内价格喂价、K 线聚合器、三明治检测、套利扫描。
 
-**验证**：`indexer_test.go` 用可编程的假数据源构造分叉；`chain_test.go` 在 go-ethereum 模拟后端上做真实的链重组；集成测试在 Hardhat 节点上用 `evm_snapshot / evm_revert` 制造 Reorg，断言回滚后链下状态与链上 `slot0 / liquidity` 完全一致。
+**验证**：`indexer_test.go` 用可编程的假数据源构造分叉；`chain_test.go` 在 go-ethereum 模拟后端上做真实的链重组，并验证跨区块范围的批量拉取（`TestBlockEventsRange`）；集成测试在 Hardhat 节点上用 `evm_snapshot / evm_revert` 制造 Reorg，断言回滚后链下状态与链上 `slot0 / liquidity` 完全一致。
 
 **代码位置**：`backend/indexer/indexer.go`, `backend/indexer/pool_state.go`, `backend/indexer/sim_source.go`, `backend/indexer/events.go`
 
@@ -1430,7 +1453,7 @@ return wordEnd, nil   // 本 word 内没有已初始化的 tick：停在边界
 │     每条路径逐池逐 tick 模拟产出        │
 │  ③ 取最终产出最高的一条                │
 │                                       │
-│ 超时 / 无可用路径？→ 进入 Level 2      │
+│ 超时？→ 进入 Level 2                   │
 └───────────┬───────────────────────────┘
             │ 搜索成功
             ▼
@@ -1466,6 +1489,10 @@ for i, c := range candidates {
 }
 wg.Wait()
 ```
+
+降级只发生在两种情况：并发搜索数已达上限，或搜索超时。搜索正常跑完但没有可成交的路径时不降级——直连池本来就在候选里，降级不会有不同的结果——直接返回错误，API 层映射为 404。
+
+Go 基准（`router/bench_test.go`）量了这两层的开销：单池模拟一笔不跨 tick 的 swap 约 4.1 µs，穿越 20 个 tick 约 40 µs；64 条三跳候选路径串行评估 1,524 µs，交给 Worker Pool 并发评估 768 µs（1.98×）。完整数据见[压测](#压测)。
 
 精确输出走 `FindExactOutputRoute`：在直连池里找投入最少的那个（与合约的 `exactOutputSingle` 对应，只支持单池）。
 
@@ -1540,20 +1567,6 @@ func (c *Cache) GetOrLoad(key string, loader func() (interface{}, error)) (inter
 有 Singleflight：3 个请求 = 1 次 RPC 调用
 ```
 
-**缓存预热（防止冷启动雪崩）**：
-
-```go
-// 系统启动时预加载 Top N 交易对
-// 使用 10x TTL，确保预热数据在系统稳定前不过期
-func (c *Cache) Warmup(config WarmupConfig, loader func(...) (interface{}, error)) int {
-    for _, pair := range config.TopPairs {
-        val, err := loader(pair.Token0, pair.Token1, pair.Fee)
-        if err != nil { continue }  // 预热失败不阻塞启动
-        c.SetWithTTL(key, val, c.ttl*10)  // 10x TTL
-    }
-}
-```
-
 **按区块失效**
 
 报价的缓存 key 带上索引器的最新区块号。池子状态只在新区块到来时变化，同一区块内重复报价直接命中缓存，出了新区块自动失效，不会返回过期报价：
@@ -1568,7 +1581,28 @@ result, err := s.cache.GetOrLoad(cacheKey, func() (interface{}, error) {
 
 TWAP 读数也用同样的方式缓存（key 为 `twap:{池子}:{区块号}`），一个区块内对同一个池子只问节点一次。
 
-**代码位置**：`backend/cache/cache.go`, `backend/api/server.go`
+**条目数上限**
+
+缓存 key 里带着请求参数（报价金额）。不设上限的话，一直变换金额的请求会让缓存在 TTL（30 秒）到期之前无限增长。缓存有条目数上限（默认 10000），超过后按写入顺序淘汰最早的条目：
+
+```go
+// cache/cache.go — SetWithTTL
+if _, exists := c.data[key]; !exists {
+    c.order = append(c.order, key)        // 各 key 首次写入的顺序，队头最早
+}
+c.data[key] = entry
+
+for len(c.data) > c.maxEntries && len(c.order) > 0 {
+    delete(c.data, c.order[0])
+    c.order = c.order[1:]
+}
+```
+
+压测里“每个请求一个新金额”的场景下，加上限后后端常驻内存从 762.4 MB 降到 69.1 MB（见[压测](#压测)）。
+
+存储是 map + 读写锁，后台协程按 TTL 周期清理过期条目；命中和未命中次数计入 `cache_hits_total` / `cache_misses_total`。
+
+**代码位置**：`backend/cache/cache.go`, `backend/cache/cache_test.go`, `backend/api/server.go`
 
 ---
 
@@ -1579,8 +1613,8 @@ TWAP 读数也用同样的方式缓存（key 为 `twap:{池子}:{区块号}`）�
 | 价格源 | 特点 | 弱点 |
 |--------|------|------|
 | 池内现价（`sqrtPriceX96`） | 实时 | 一笔大单（或闪电贷）就能在单个区块内拉偏 |
-| 池内 TWAP（第 10 节） | 要整个窗口都顶住才会动，操纵成本高 | 对真实的快速行情反应慢 |
-| Chainlink | 独立于本池子 | 有心跳间隔，可能过期 |
+| 池内 TWAP（第 10 节） | 要整个窗口都顶住才会动，操纵成本高 | 对真实的快速行情反应慢；和现价来自同一个池子 |
+| Chainlink 喂价 | 独立于本池子 | 有心跳间隔，可能过期或停更 |
 
 三者两两比较，各管一类风险：
 
@@ -1589,17 +1623,83 @@ TWAP 读数也用同样的方式缓存（key 为 `twap:{池子}:{区块号}`）�
                  │  Chainlink   │
                  └──┬────────┬──┘
         偏离 > 2%   │        │   偏离 > 2%
-        保护模式    │        │   保护模式（不是瞬时波动）
+        拒绝交易    │        │   保护模式（不是瞬时波动）
               ┌─────▼──┐  ┌──▼─────┐
               │ 池内现价 │◄─►│池内 TWAP│
               └────────┘  └────────┘
                   偏离 > 5%：疑似单区块操纵
-                  交易前检查直接拒绝
+                  拒绝交易
 ```
 
-**现价 vs TWAP：操纵拒绝**
+每次报价、构造交易、提交交易，都对路由经过的每个池子做一遍校验（`checkPool`）：先读 Chainlink，再读 TWAP，两者都记入预言机后一起做三方交叉验证。
 
-已连接节点时，每次报价、构造交易、提交交易，都会对路由经过的每个池子读一次链上 TWAP（`chain.Client.TWAP` 调用池子的 `observe([window, 0])`，窗口默认 600 秒），与索引器里的现价比对：
+#### 读取链上 Chainlink 喂价
+
+喂价直接读链上聚合器合约（`AggregatorV3Interface` 的 `latestRoundData()` 和 `decimals()`），按币对配置：
+
+```
+CHAINLINK_FEEDS=base:quote:聚合器地址:baseDecimals:quoteDecimals[:心跳秒数]     多个喂价用逗号分隔
+```
+
+**有效性检查**。`latestRoundData()` 永远会返回一组数，但这组数不一定能用：
+
+```go
+// oracle/chainlink.go
+func ValidateRound(round *chain.ChainlinkRound, heartbeat time.Duration) error {
+    switch {
+    case round.Answer == nil || round.Answer.Sign() <= 0:
+        return errors.New("answer 不是正数")
+    case round.UpdatedAt == 0:
+        return errors.New("轮次未完成（updatedAt = 0）")
+    case round.AnsweredInRound.Cmp(round.RoundID) < 0:
+        return fmt.Errorf("答案来自旧轮次（answeredInRound %s < roundId %s）", round.AnsweredInRound, round.RoundID)
+    case round.UpdatedAt > round.BlockTime:
+        return errors.New("updatedAt 晚于最新区块时间")
+    case round.BlockTime-round.UpdatedAt > uint64(heartbeat/time.Second):
+        return fmt.Errorf("喂价已过期：%d 秒未更新（心跳阈值 %d 秒）", ...)
+    }
+    return nil
+}
+```
+
+过期判断用的是**链上最新区块的时间**，不是本机时钟：本机时钟和链上时间可能有偏差，测试链的时间还可以被任意拨动。心跳阈值按喂价配置，缺省 1 小时。
+
+**口径换算**（最容易错的地方）。喂价是“1 个 base 值多少 quote”，按人类单位计，再乘以 `10^feedDecimals`；池子价格是 `token1 最小单位 / token0 最小单位`，未按 decimals 调整，而且哪个币是 token0 由地址大小决定：
+
+```
+P = answer / 10^feedDecimals                          例：ETH/USD answer=200000000000, decimals=8 → P = 2000
+
+base 是 token0：poolPrice = P × 10^(quoteDecimals - baseDecimals)
+base 是 token1：poolPrice = (1/P) × 10^(baseDecimals - quoteDecimals)
+
+例：WETH(18 位) / USDC(6 位)，P = 2000
+  WETH 是 token0：1 wei WETH 值 2000 × 10^(6-18) = 2e-9 个 USDC 最小单位
+  USDC 是 token0：1 个 USDC 最小单位值 (1/2000) × 10^(18-6) = 5e8 wei WETH
+```
+
+```go
+func (f FeedConfig) PoolPrice(humanPrice float64, token0 string) float64 {
+    if token0 == f.Base {
+        return humanPrice * math.Pow10(int(f.QuoteDecimals)-int(f.BaseDecimals))
+    }
+    return 1 / humanPrice * math.Pow10(int(f.BaseDecimals)-int(f.QuoteDecimals))
+}
+```
+
+**缓存与刷新**。每个喂价的读数缓存 `CHAINLINK_REFRESH_SECONDS`（默认 15 秒），过期后由下一次查询触发刷新，同一个喂价同时只有一个刷新请求在途；`decimals` 不会变，只读一次；RPC 经过 chain 包的断路器。节点查询失败时不缓存、也不沿用旧读数——旧读数是否还在心跳之内已经无法确认。
+
+**不可用时降级为两方**。任何一项有效性检查不通过、或节点查询失败，这个喂价就是 `unavailable`：预言机把这个币对的 Chainlink 价格清掉，交叉验证降级为“现价 vs TWAP”两方，响应里说明原因，绝不拿坏数据去比较。
+
+| Chainlink 校验结果 | `GET /quote` | `POST /swap/build`、`POST /swap` |
+|-------------------|-------------|--------------------------------|
+| `ok` | 正常 | 正常 |
+| `deviated`（现价偏离喂价 > 2%） | 返回报价并带警告 | **403 拒绝** |
+| `unavailable`（过期、轮次未完成、旧轮次、非正数、节点查询失败） | 带警告，说明原因 | 放行并带警告，校验降级为两方 |
+| `none`（该币对没有配置喂价） | 不参与校验 | 不参与校验 |
+
+#### 现价 vs TWAP：操纵拒绝
+
+已连接节点时，`chain.Client.TWAP` 调用池子的 `observe([window, 0])`（窗口默认 600 秒），与索引器里的现价比对：
 
 ```go
 // oracle/oracle.go — CheckTWAP
@@ -1617,35 +1717,40 @@ if check.Deviation > o.config.MaxTWAPDeviation {   // 默认 5%
 
 **观测不足时的降级**：池子太新或观测容量小时，600 秒前的数据已被覆盖，链上 `observe` 会 revert `OLD`。这时 `TWAP` 读出最老一条观测的时间戳，退到它能覆盖的最长窗口并标记 `degraded`；连最短窗口（默认 60 秒）都覆盖不了才返回 `unavailable`。
 
-**Chainlink 有效性与保护模式**
+#### 校验明细 `price_checks`
 
-```go
-// oracle/oracle.go
-func (o *Oracle) UpdateChainlinkPrice(pair string, price float64, updatedAt time.Time) {
-    // 关键：不只存价格，还校验 updatedAt
-    isStale := time.Since(updatedAt) > o.config.StaleThreshold  // 默认 1 小时
-    // ...
-    if isStale {
-        o.activateProtection(pair, "Chainlink 价格过期…")
-    }
+`/quote`、`/swap/build` 的响应里带 `price_checks`（路径上每个池子一条），`/twap?pool=` 返回单个池子的同一结构。`sources` 列出这次实际参与校验的价格源，三个都在是三方校验。下面是本地部署后、池子刚创建时的一次真实返回——TWAP 观测还不足，所以是“现价 + Chainlink”两方（省略了值为 0 的字段）：
+
+```json
+{
+  "pool": "0x93bea4f2139418874a17b84a9b6928c8573e0330",
+  "spot": 0.0005,
+  "sources": ["spot", "chainlink"],
+  "status": "unavailable",
+  "detail": "预言机观测不足",
+  "chainlink_status": "ok",
+  "chainlink": 0.0005
 }
 ```
 
+（这个池子里 USDC 是 token0，所以现价是 1/2000；喂价 ETH/USD = 2000 换算后同样是 0.0005。）
+
+#### 保护模式
+
 | 事件 | 操作 |
 |------|------|
-| Chainlink `updatedAt` 超过 1 小时 | 激活保护模式；过期价格不再参与比较，在它更新之前不解除 |
-| 池内现价与 Chainlink 偏离 > 2% | 激活保护模式 |
+| 池内现价与 Chainlink 偏离 > 2% | 激活保护模式（同时该笔交易被拒绝） |
 | 池内 TWAP 与 Chainlink 偏离 > 2% | 激活保护模式 |
 | 池内现价与 TWAP 偏离 > 5% | 激活保护模式（同时该笔交易被拒绝） |
 | 全部恢复正常且冷却时间（5 分钟）已过 | 解除保护模式 |
 
-保护模式下不一刀切拒绝交易（避免变成 DoS），而是要求滑点设置不低于 0.5%，不满足的请求被拒绝，满足的放行并附带风险提示。
+保护模式下不一刀切拒绝交易（避免变成 DoS），而是要求滑点设置不低于 0.5%，不满足的请求被拒绝，满足的放行并附带风险提示。当前处于保护模式的交易对出现在 `GET /api/v1/status` 的 `protected_pairs` 里。
 
-池内现价由两条路径喂给预言机：索引器每处理一笔 Swap 推送一次（`PoolPriceFeed`），以及每次 TWAP 校验时连同 TWAP 一起写入。
+池内现价由两条路径喂给预言机：索引器每处理一笔 Swap 推送一次（`PoolPriceFeed`），以及每次校验时连同参考价一起写入。偏离和不可用的次数计入 `oracle_chainlink_deviation_total`、`oracle_chainlink_unavailable_total`、`oracle_twap_deviation_total`、`oracle_twap_unavailable_total`。
 
-> 使用说明：Chainlink 价格通过 `Oracle.UpdateChainlinkPrice` 注入，由接入方的喂价任务调用；未注入时交叉校验在池内现价与 TWAP 两者之间进行。
+**验证**：`chainlink_test.go` 覆盖配置解析、五项有效性检查、两种 token 顺序和不同 decimals 的换算、缓存与刷新、三方降级；集成测试用一个可控的聚合器合约（`TestAggregator`）在真实节点上走完“喂价正常 → 三方校验放行；喂价比池价高 10% → 403；过期 / 轮次未完成 / 旧轮次 / 负价 → 降级放行并说明原因；喂价恢复 → 回到三方”。
 
-**代码位置**：`backend/oracle/oracle.go`, `backend/chain/contracts.go`（`TWAP`）, `backend/api/trade.go`（`checkPriceSafety`）
+**代码位置**：`backend/oracle/chainlink.go`, `backend/oracle/oracle.go`, `backend/chain/contracts.go`（`TWAP` `ChainlinkLatestRound`）, `backend/api/trade.go`（`checkPriceSafety` `checkPool`）
 
 ---
 
@@ -1659,7 +1764,7 @@ func (o *Oracle) UpdateChainlinkPrice(pair string, price float64, updatedAt time
 1. POST /api/v1/swap/build
      后端：搜索路由 → 价格安全检查 → MEV 检查 → 链上报价抽检
            → 把路由编码成 Manager 的调用数据
-     返回：{ to, data, value, chain_id, gas_limit, gas, min_amount_out, deadline, ... }
+     返回：{ to, data, value, chain_id, gas_limit, gas, min_amount_out, deadline, price_checks, ... }
 
 2. 用户钱包对 { to, data, value, gas_limit } 签名，得到 raw_tx
 
@@ -1716,6 +1821,18 @@ if s.config.ManagerAddress != "" && info.To != strings.ToLower(s.config.ManagerA
 ```
 
 不带 `raw_tx` 时接口只返回检查结果（`status: "validated"`），由客户端自行提交。
+
+**状态码**区分“请求的问题”和“服务的问题”：
+
+| 情况 | 状态码 |
+|------|-------|
+| 找不到可成交的路径（币对不存在、流动性不足） | 404 |
+| 参数不合法；MEV 交易前检查不通过 | 400 |
+| EIP-712 验签失败 | 401 |
+| 价格安全检查拒绝；`raw_tx` 签名者或目标不对 | 403 |
+| 节点明确拒绝这笔交易（nonce 不对、余额不足等） | 400 |
+| 连不上节点，广播失败 | 502 |
+| 未连接节点或未配置 Manager | 503 |
 
 **交易状态：延迟确认**
 
@@ -1890,48 +2007,54 @@ func (e *Estimator) Estimate(ctx context.Context, gasLimit uint64) Estimate {
 `kline.Aggregator` 订阅索引器的 Swap 事件流，按池子聚合出 **1m / 5m / 15m / 1h / 4h / 1d** 六个周期的 OHLCV，并保留最近的逐笔成交：
 
 - **价格**：由成交后的 `sqrtPriceX96` 换算，`price = (sqrtPriceX96 / 2^96)²`
-- **成交量**：`amount0 / amount1` 的绝对值
+- **成交量**：`amount0 / amount1` 的绝对值，用定点整数（`big.Int`，最小单位）累加，不丢精度；接口里的 `volume0 / volume1` 是十进制字符串，避免超出 JavaScript 的安全整数范围
 - **时间**：区块时间戳
 
 每笔成交依次并入六个周期的最后一根 K 线（或开一根新的）：
 
 ```go
 // kline/kline.go
-func (a *Aggregator) merge(series []Candle, secs int64, c Candle) []Candle {
-    c.OpenTime = bucket(c.OpenTime, secs)             // 对齐到周期起点
-    if n := len(series); n > 0 && series[n-1].OpenTime == c.OpenTime {
+func (a *Aggregator) merge(series []candle, secs int64, c candle) []candle {
+    c.openTime = bucket(c.openTime, secs)             // 对齐到周期起点
+    if n := len(series); n > 0 && series[n-1].openTime == c.openTime {
         last := &series[n-1]
-        last.High = max(last.High, c.High)
-        last.Low = min(last.Low, c.Low)
-        last.Close = c.Close
-        last.Volume0 += c.Volume0
-        last.Volume1 += c.Volume1
-        last.Trades += c.Trades
+        last.high = max(last.high, c.high)
+        last.low = min(last.low, c.low)
+        last.close = c.close
+        last.volume0.Add(last.volume0, c.volume0)     // 定点整数原地累加
+        last.volume1.Add(last.volume1, c.volume1)
+        last.trades += c.trades
         return series
     }
     // ... 追加新的一根，超过 MaxCandles 时淘汰最老的
 }
 ```
 
-**Reorg 重算**
+**Reorg 回滚：按区块检查点恢复**
 
-区块时间戳随区块号单调递增，所以回滚区块 `>= forkBlock` 时可以精确地只重算受影响的部分：
+一根 K 线的最高价、最低价不能“减去”一笔成交，所以回滚不能靠逆运算。做法是检查点：每个区块的第一笔成交进来之前，先把当时最新的那根 1m K 线存一份。
 
 ```
-成交（按时间）:  t1  t2  t3 │ t4  t5  t6        │ = 分叉点，t4 起被回滚
-1m K 线:        [ m1 ][  m2    ][ m3 ]          t4 落在 m2 里
+区块:        100        101        102 │ 103        104        │ = 分叉点（forkBlock = 103）
+检查点:      cp100      cp101      cp102 │ cp103      cp104
+                                         │   ▲
+                                         │   └ 区块 103 的成交进来之前，最新那根 1m K 线的样子
 
-1. 丢弃成交 t4、t5、t6
-2. 各周期：删除起点 >= m2 所在周期的 K 线
-3. 1m：用 m2 这一分钟内幸存的成交（t3）重算 m2
-4. 5m / 15m / 1h / 4h / 1d：受影响的那一根，由 1m K 线重新合并
+回滚 >= 103：
+1. 取第一个被回滚区块的检查点 cp103，丢弃 cp103 及之后的检查点和成交
+2. 1m：cp103 之后的 K 线全部删除，cp103 那一根恢复成存下来的样子
+3. 5m / 15m / 1h / 4h / 1d：受影响的那一根由 1m K 线重新合并，之后的删除
 ```
 
-随后索引器从分叉点重新索引，新链上的成交按正常流程再次进入聚合器。
+这样回滚后的 K 线与“从没见过被回滚的成交”完全一致，与内存里还保留着多少笔成交无关。每个池子保留最近 256 个有成交的区块的检查点，远大于索引器的回滚窗口（默认 24 个区块）；回滚得比这还深时，清空这个池子的 K 线，用保留的成交重建。随后索引器从分叉点重新索引，新链上的成交按正常流程再次进入聚合器。
 
 **内存上限**：每个池子每个周期最多保留 1500 根 K 线、1000 笔成交，最多跟踪 1024 个池子。
 
 查询接口：`GET /api/v1/klines?pool=&interval=&limit=`、`GET /api/v1/trades?pool=&limit=`；每笔成交和更新后的 1m K 线同时经 SSE 推送（第 26 节）。链上历史的持久化索引由子图承担（第 13 节）。
+
+Go 基准：写入一笔成交并更新六个周期的 K 线约 1.0 µs（单池）；查询最近 100 根 1m K 线约 16.9 µs（见[压测](#压测)）。
+
+**验证**：`kline_test.go` 覆盖多周期聚合、成交量精确（`TestVolumeIsExact`）、Reorg 重算、回滚范围超出成交保留条数时仍然精确（`TestReorgExactBeyondTradeRetention`）、回滚深度超过检查点时重建（`TestReorgDeeperThanCheckpoints`）、内存上限、并发访问。
 
 **代码位置**：`backend/kline/kline.go`, `backend/kline/kline_test.go`
 
@@ -1951,31 +2074,47 @@ func (a *Aggregator) merge(series []Candle, secs int64, c Candle) []Candle {
 
 **检测**
 
-`mev.Guard` 订阅 Swap 事件流，把当前区块内每个池子的 swap 按 `logIndex` 排好。每来一笔新的 swap，就把它当作“反向平仓”向前找配对的抢跑交易：
+`mev.Guard` 订阅 Swap 事件流，按“当前区块 × 池子”维护区块内的 swap 序列。配对条件：
+
+- 抢跑交易与平仓交易来自同一交易方（`sender` 和 `recipient` 都相同）、方向相反
+- 两者之间至少有一笔别人的、与抢跑同向的交易（受害者）
+
+攻击者按 `(sender, recipient)` 一起识别：经路由合约下单时 `sender` 都是路由合约，要靠 `recipient` 才能区分是谁。
+
+**怎样不做 O(n²) 的向前扫描**
+
+每来一笔新的 swap B（交易方 X、方向 d），把它当作“反向平仓”，要回答两个问题。朴素做法是向前逐个配对，同一个地址在一个区块里来回买卖时每笔都要扫完整个区块。这里用两个索引把每笔的成本压到 O(log n)：
+
+| 问题 | 索引 | 成本 |
+|------|------|------|
+| B 之前最近的一笔“别人的、方向与 B 相反”的 swap 在哪？（潜在受害者 v） | `latest`：每个方向记住最近一笔 swap 的下标和交易方，以及最近一笔“交易方不同”的 swap 的下标 | O(1) |
+| X 自己在 v 之前最近的一笔反方向 swap 在哪？（抢跑交易 f） | `byActor`：每个交易方、每个方向一个升序的下标列表 | 二分查找 |
 
 ```go
-// mev/mev.go — findFrontRun
-// 配对条件：
-//   - 抢跑交易与平仓交易来自同一地址（sender 和 recipient 都相同）、方向相反
-//   - 两者之间至少有一笔别人的、与抢跑同向的交易（受害者）
-for front = back - 1; front >= 0; front-- {
-    f := swaps[front]
-    if !sameActor(f, b) || zeroForOne(f) == zeroForOne(b) || f.TxHash == b.TxHash {
-        continue
-    }
-    victims = nil
-    for _, v := range swaps[front+1 : back] {
-        if !sameActor(v, f) && zeroForOne(v) == zeroForOne(f) && v.TxHash != f.TxHash && v.TxHash != b.TxHash {
-            victims = append(victims, v.TxHash)
-        }
-    }
-    if len(victims) > 0 {
-        return front, victims
-    }
+// mev/mev.go — poolBlock.match
+// 最近一笔别人的反方向 swap
+last := pb.latest[opposite]
+victim := last.index
+if last.by == who {
+    victim = last.otherIndex
+}
+if victim < 0 {
+    return nil
+}
+
+// 自己在它之前的反方向 swap，从最近的开始找
+fronts := pb.byActor[who][opposite]
+for i := sort.SearchInts(fronts, victim) - 1; i >= 0; i-- {
+    front := pb.swaps[fronts[i]]
+    // ... 收集 front 之后、方向相同、不是自己的交易作为受害者；有受害者即命中
 }
 ```
 
-攻击者按 `(sender, recipient)` 一起识别：经路由合约下单时 `sender` 都是路由合约，要靠 `recipient` 才能区分是谁。命中后记录告警（攻击者、抢跑交易、平仓交易、受害交易列表）、计入 `mev_sandwich_detected_total`、经 SSE 推送；Reorg 时丢弃分叉点之后的告警。
+只有命中时才扫描 f 和 B 之间的 swap 来收集受害者，命中后这一组交易结案、清空索引。整个区块 O(n log n)，不需要给单个区块内的 swap 数设上限。事件正常按 `logIndex` 顺序到达时增量检测；乱序到达时按 `logIndex` 排好后整段重放。
+
+Go 基准里的最不利输入（同一个地址在一个区块里来回买卖 256 笔、没有别人的交易）：单笔处理 49 ns，且不随区块内 swap 数增长；改用索引之前是 16,698 ns（见[压测](#压测)）。
+
+命中后记录告警（攻击者、抢跑交易、平仓交易、受害交易列表）、计入 `mev_sandwich_detected_total`、经 SSE 推送；Reorg 时丢弃分叉点之后的告警。
 
 **交易前保护**
 
@@ -2047,9 +2186,9 @@ func Profit(sell, buy indexer.PoolSnapshot, borrow string, lenderFee uint32, amo
 **扫描流程**（每笔 Swap 触发，只比较成交的那个池子和同币对的其它池子）：
 
 1. **定方向**：价格高的池子里 token0 更贵。借 token0 就在高价池卖、低价池买回；借 token1 反过来
-2. **选放贷池**：含有借入 token、既不是卖出池也不是买入池、活跃流动性最大的池子（必须是第三个池子的原因见第 11 节）
+2. **列出候选放贷池**：含有借入 token、既不是卖出池也不是买入池的池子（必须是第三个池子的原因见第 11 节），按活跃流动性从大到小依次尝试。闪电贷费率不同，最优借入量和利润也不同
 3. **快速排除**：借入量趋近于 0 时的边际利润都不为正（`价格比 × (1-卖出池费率) × (1-买入池费率) <= 1 + 闪电贷费率`），不必搜索
-4. **三分搜索**最优借入量和毛利润
+4. **三分搜索**最优借入量和毛利润，然后**读一次放贷池的链上余额**（ERC20 `balanceOf`）：闪电贷借的是池子合约实际持有的 token，这个数不在事件里；不够借就换下一个候选
 5. **扣 gas**：用第 22 节的 `CostWei` 算出一笔套利的 gas 成本，按 WETH 直连池的现价折算成借入 token；净利润不为正则放弃
 6. **编码**：生成 `FlashArbitrage.arbitrage` 的调用数据，`minProfit` 设为 gas 成本——链上实际利润达不到就整笔 revert
 
@@ -2126,6 +2265,8 @@ func (h *Hub) Broadcast(kind string, payload interface{}) {
 ```
 
 被断开的客户端重连后从最新数据继续，而不是让它的积压反过来卡住所有人。同时在线的客户端上限是 1024，超过时新的订阅返回 503。
+
+压测结果：500 个订阅端同时在线时，一条消息从最早到最晚收到的订阅端相差（扇出）中位 1.71 ms；200 个正常订阅端加 5 个只连不读的慢客户端，短时间灌入 6,000 笔成交，1,200,000 条推送全部送达，5 个慢客户端被断开，正常订阅端无一受影响（见[压测](#压测)）。
 
 **SSE 协议细节**：
 
@@ -2397,48 +2538,50 @@ func L(ctx context.Context) *slog.Logger {
 }
 ```
 
-**使用示例**：
+**HTTP 中间件注入 Trace ID**
+
+每个请求带一个 Trace ID：客户端通过 `X-Trace-Id` 请求头传入就沿用（网关、上游服务可以把同一个 ID 串下来），否则生成一个。ID 放进 context，同时写回响应头，客户端报障时可以拿它查日志：
 
 ```go
-// 初始化：级别 + 输出格式（json / text）
-logging.Init("info", "json")
-
-// 请求入口处生成 TraceID
-ctx = logging.WithTraceID(ctx)
-
-// 业务代码中使用
-logging.L(ctx).Info("处理 swap 请求",
-    "token_in", "WETH",
-    "token_out", "USDC",
-    "amount", "1000000000000000000",
-)
-```
-
-**JSON 日志输出**：
-
-```json
-{
-  "time": "2024-01-01T00:00:00.123Z",
-  "level": "INFO",
-  "msg": "处理 swap 请求",
-  "trace_id": "a1b2c3d4e5f67890abcd1234",
-  "token_in": "WETH",
-  "token_out": "USDC",
-  "amount": "1000000000000000000"
+// api/middleware.go
+func TraceMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := r.Context()
+        if id := r.Header.Get("X-Trace-Id"); validTraceID(id) {
+            ctx = logging.WithExistingTraceID(ctx, id)
+        } else {
+            ctx = logging.WithTraceID(ctx)
+        }
+        w.Header().Set("X-Trace-Id", logging.GetTraceID(ctx))
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
 }
 ```
 
-在 Grafana / Kibana 中搜索 `trace_id` 即可看到这个请求经过的所有模块的日志。
+客户端传入的 ID 只接受 8 ~ 64 位的字母、数字、连字符（`validTraceID`），避免把任意内容写进日志。
 
-chain / gas / mev / arb / ws 这些模块直接用 slog 的键值对风格输出关键事件，例如断路器状态变化、三明治告警、发现套利机会：
+请求的 context 一路传到路由引擎，后面所有用 `logging.L(ctx)` 打的日志都带同一个 `trace_id`：访问日志、限流和并发上限的拒绝、路由降级、高 gas 警告。索引器的轮询协程用自己的根 context 打日志；chain / gas / mev / arb / ws 等不在请求路径上的模块直接用 slog 的键值对风格输出关键事件（断路器状态变化、三明治告警、发现套利机会）。
 
-```go
-slog.Warn("检测到疑似三明治攻击",
-    "pool", alert.Pool, "block", alert.BlockNumber, "attacker", alert.Attacker,
-    "front_tx", alert.FrontTx, "back_tx", alert.BackTx, "victims", len(victims))
+**访问日志**（一次真实运行的输出，`LOG_FORMAT=text`）：
+
+```
+time=2026-11-24T23:43:09.890-08:00 level=INFO msg=请求完成 trace_id=my-trace-12345 method=GET path=/health status=200 latency_ms=0.019
+time=2026-11-24T23:43:09.865-08:00 level=INFO msg=请求完成 trace_id=cfe731137c41ce4104d6e85c method=GET path=/api/v1/quote status=404 latency_ms=0.061
 ```
 
-**代码位置**：`backend/logging/logging.go`
+第一行是客户端带着 `X-Trace-Id: my-trace-12345` 发来的请求，第二行的 ID 由服务端生成。在 Grafana / Kibana 中搜索 `trace_id` 即可看到这个请求经过的所有模块的日志。
+
+**配置**：
+
+| 环境变量 | 取值 | 说明 |
+|---------|------|------|
+| `LOG_LEVEL` | `debug` / `info`（默认）/ `warn` / `error` | 索引器逐事件的处理日志、限流和并发上限的逐条拒绝日志是 debug 级别 |
+| `LOG_FORMAT` | `text`（默认）/ `json` | JSON 格式可被 ELK / Loki 直接采集 |
+| `ACCESS_LOG` | `off` 关闭 | 关闭逐请求的访问日志 |
+
+逐条日志放在 debug 级别是有原因的：过载时每秒可能拒绝上万个请求，逐条打 warn 日志只会让服务更慢，拒绝数由指标统计。压测里打开访问日志（每个请求一行结构化日志）对吞吐的影响在各轮之间的波动范围之内（见[压测](#压测)）。
+
+**代码位置**：`backend/logging/logging.go`, `backend/api/middleware.go`
 
 ---
 
@@ -2497,6 +2640,12 @@ P99 = 99% 的请求在 X ms 内完成
 
 | 指标 | 类型 | 含义 |
 |------|------|------|
+| `http_requests_total` | Counter | HTTP 请求总数（含被 429 / 503 拒绝的） |
+| `http_request_duration_ms` | Histogram | 请求延迟分布 |
+| `http_active_connections` | Gauge | 在途请求数 |
+| `http_rate_limited_total` | Counter | 被每 IP 限流拒绝的请求数（429） |
+| `http_concurrency_rejected_total` | Counter | 被全局并发上限拒绝的请求数（503） |
+| `cache_hits_total` / `cache_misses_total` | Counter | 缓存命中 / 未命中次数 |
 | `router_requests_total` | Counter | 路由请求总数 |
 | `router_degraded_total` | Counter | 降级到直连路径的次数 |
 | `router_latency_ms` | Histogram | 路由搜索延迟 |
@@ -2510,6 +2659,8 @@ P99 = 99% 的请求在 X ms 内完成
 | `oracle_twap_checks_total` | Counter | TWAP 校验次数 |
 | `oracle_twap_deviation_total` | Counter | 现价偏离 TWAP 超阈值的次数 |
 | `oracle_twap_unavailable_total` | Counter | TWAP 不可用的次数 |
+| `oracle_chainlink_deviation_total` | Counter | 现价偏离 Chainlink 喂价超阈值的次数 |
+| `oracle_chainlink_unavailable_total` | Counter | Chainlink 喂价不可用的次数 |
 | `mev_sandwich_detected_total` | Counter | 检测到的三明治攻击数 |
 | `mev_swaps_rejected_total` | Counter | 被交易前保护拒绝的请求数 |
 | `swap_signature_rejected_total` | Counter | EIP-712 验签失败次数 |
@@ -2541,7 +2692,7 @@ router_latency_ms_p99 95.00
 quote_onchain_mismatch_total 0
 ```
 
-Prometheus 定期 scrape 此端点，Grafana 展示面板。集成测试的最后一步也读这个端点：断言 `quote_onchain_mismatch_total` 为 0、`mev_sandwich_detected_total` 为 1，套利和 TWAP 偏离计数大于 0。
+Prometheus 定期 scrape 此端点，Grafana 展示面板。集成测试的最后一步也读这个端点：断言 `quote_onchain_mismatch_total` 为 0、`mev_sandwich_detected_total` 为 1，套利和 TWAP 偏离计数大于 0。压测脚本用 `http_requests_total` 在每轮前后的增量核对 k6 发出的请求数，8 个场景全部一致（见[压测](#压测)）。
 
 **代码位置**：`backend/metrics/metrics.go`
 
@@ -2559,8 +2710,8 @@ Prometheus 定期 scrape 此端点，Grafana 展示面板。集成测试的最�
 │ Layer 1: 每 IP 限流 (Token Bucket)│
 │                                   │
 │ 每个 IP 有一个令牌桶               │
-│ 容量 = 100                        │
-│ 补充速率 = 每秒 1 个               │
+│ 持续速率 = 100 请求/秒             │
+│ 突发容量 = 200（桶的大小）         │
 │ 每次请求消耗 1 个令牌              │
 │                                   │
 │ 桶空？→ 429 Too Many Requests     │
@@ -2582,44 +2733,60 @@ Prometheus 定期 scrape 此端点，Grafana 展示面板。集成测试的最�
       正常处理请求
 ```
 
-完整的中间件链是 `CORS → Logging → RateLimit → ConcurrencyLimit → Handler`。
+完整的中间件链是 `CORS → Trace → Metrics → Logging → RateLimit → ConcurrencyLimit → Handler`。Metrics 放在两个限制的外层，被 429 / 503 拒绝的请求也计入 `http_requests_total`。
 
-**按 IP 而不是按连接限流**：`r.RemoteAddr` 是 `IP:端口`，每个连接的端口都不同，直接拿它当 key 等于没限流。中间件先用 `net.SplitHostPort` 去掉端口（`middleware_test.go` 的 `TestRateLimitIsPerIPNotPerConnection` 覆盖了这一点）。
+| 环境变量 | 默认值 | 说明 |
+|---------|-------|------|
+| `RATE_LIMIT_PER_IP` | `100` | 每 IP 的持续速率（请求/秒），`0` = 不限流 |
+| `RATE_LIMIT_BURST` | `200` | 每 IP 的突发容量（令牌桶大小），`0` = 与速率相同 |
+| `MAX_CONCURRENT` | `500` | 全局并发上限，`0` = 不限 |
 
-**Token Bucket 算法详解**：
+两个限制都可以设为 0 关闭：压测吞吐上限、或由前置网关负责限流时使用。
+
+**Token Bucket 算法**：
+
+速率 `rate` 请求/秒对应每 `1/rate` 秒补 1 个令牌，桶里最多攒 `burst` 个：
 
 ```go
-// 每个 IP 有独立的令牌桶
-type tokenBucket struct {
-    tokens   int        // 当前令牌数
-    lastTime time.Time  // 上次补充时间
-}
+// api/server.go — Handler
+handler = NewRateLimiter(burst, time.Second/time.Duration(rate)).Middleware(handler)
 
-func (rl *RateLimiter) Allow(ip string) bool {
-    bucket := rl.buckets[ip]
-
-    // 按时间补充令牌
-    elapsed := time.Since(bucket.lastTime)
-    refilled := int(elapsed / rl.refillRate)
-    bucket.tokens = min(bucket.tokens + refilled, rl.maxTokens)
-
-    if bucket.tokens <= 0 {
-        return false  // 桶空，拒绝
+// api/middleware.go — Allow
+elapsed := time.Since(bucket.lastTime)
+refilled := int(elapsed / rl.refillRate)
+if refilled > 0 {
+    bucket.tokens += refilled
+    if bucket.tokens > rl.maxTokens {
+        bucket.tokens = rl.maxTokens
     }
-    bucket.tokens--
-    return true
+    // 只推进已经兑换成 token 的那部分时间，不足一个 token 的零头留到下次
+    bucket.lastTime = bucket.lastTime.Add(time.Duration(refilled) * rl.refillRate)
 }
-
-// 过期桶清理（防止内存泄漏）
-// 每 5 分钟清理 10 分钟未活跃的桶
-go rl.cleanup()
+if bucket.tokens <= 0 {
+    return false  // 桶空，拒绝
+}
+bucket.tokens--
+return true
 ```
+
+“零头留到下次”这一行决定了持续速率准不准：如果每次补充都把 `lastTime` 直接设成当前时间，不足一个令牌的时间就被丢掉了，请求越密，实际速率比配置值低得越多。
+
+**按 IP 而不是按连接限流**：`r.RemoteAddr` 是 `IP:端口`，每个连接的端口都不同，直接拿它当 key 等于没限流。中间件先用 `net.SplitHostPort` 去掉端口。不活跃的桶每 5 分钟清理一次（10 分钟未活跃），防止内存泄漏。
 
 **为什么 503 而不是排队？**
 
 排队意味着请求在内存中等待，极端情况下等待队列可以无限增长导致 OOM。直接 503 + `Retry-After` 让客户端自行重试，是更安全的策略。
 
-**代码位置**：`backend/api/middleware.go`
+**压测验证**（100 并发、20 秒、所有请求来自同一个 IP，见[压测](#压测)）：
+
+| 配置 | 结果 |
+|------|------|
+| 每 IP 100 请求/秒、突发 200 | 825,061 个请求中放行 2,200 个，正好是 200（突发）+ 100 × 20（持续）；其余 822,861 个返回 429，与 `http_rate_limited_total` 的增量一致 |
+| 限流关闭、全局并发上限 20 | 698,277 个请求中 592,976 个立即返回 503，与 `http_concurrency_rejected_total` 的增量一致；全部响应的 p99 为 17.66 ms |
+
+**测试**：`middleware_test.go` 覆盖按 IP 而非按连接限流、持续速率、突发后回到持续速率、两个限制都可以关闭；`server_test.go` 覆盖 Trace ID 的沿用与生成（`TestTraceIDPropagation`）以及 HTTP 和缓存指标（`TestHTTPAndCacheMetrics`）。
+
+**代码位置**：`backend/api/middleware.go`, `backend/api/server.go`（`Handler`）
 
 ---
 
@@ -2628,6 +2795,8 @@ go rl.cleanup()
 **启动顺序（依赖图）**：
 
 ```
+0. logging.Init（LOG_LEVEL / LOG_FORMAT）
+        ↓
 1. PoolStateManager（无依赖）
         ↓
 2. 连接链节点 chain.Dial（连不上或未配置则用模拟源）
@@ -2641,7 +2810,7 @@ go rl.cleanup()
         ↓
 6. Router（依赖 PoolStateManager）
         ↓
-7. EIP-712 Verifier + API Server（依赖所有上游）
+7. EIP-712 Verifier + Chainlink 喂价读取器 + API Server（依赖所有上游）
 ```
 
 `chain.Dial` 在连接后做一次自检：按最新区块头本地复算区块哈希，再用这个哈希向节点查回区块。个别节点返回的区块头字段不全时，本地复算的哈希会和节点自己的对不上，父哈希校验会一直误报 Reorg，所以启动时先确认一次。
