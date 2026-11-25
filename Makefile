@@ -1,7 +1,7 @@
 # UniGo-DEX Makefile
 # 提供常用操作的快捷命令
 
-.PHONY: install compile test test-go test-integration test-all gas abi node deploy clean build-backend run-backend all help
+.PHONY: install compile test test-go test-integration test-all gas bench abi node deploy clean build-backend run-backend all help
 
 # 默认目标：显示帮助
 help:
@@ -14,6 +14,7 @@ help:
 	@echo "  make test-integration - 运行端到端集成测试（自起 Hardhat 节点）"
 	@echo "  make test-all       - 运行合约测试和 Go 单元测试"
 	@echo "  make gas            - 运行合约测试并打印 Gas 报告"
+	@echo "  make bench          - 运行全套压测并生成 bench/REPORT.md（约 25 分钟，需要 k6）"
 	@echo "  make abi            - 由编译产物重新生成后端内嵌的 ABI"
 	@echo "  make deploy         - 部署合约到本地网络"
 	@echo "  make node           - 启动本地 Hardhat 节点"
@@ -49,6 +50,10 @@ test-all: test test-go
 # 运行合约测试并打印 Gas 报告
 gas:
 	cd contracts && REPORT_GAS=1 npx hardhat test
+
+# 运行全套压测（Hardhat 节点 + 后端 + k6），结果写入 bench/results/ 并生成 bench/REPORT.md
+bench:
+	bench/run-all.sh
 
 # 由 Hardhat 编译产物重新生成后端内嵌的 ABI
 abi: compile
