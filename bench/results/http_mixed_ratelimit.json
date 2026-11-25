@@ -1,0 +1,22 @@
+{
+  "scenario": "mixed",
+  "label": "ratelimit",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 825061,
+  "rps": 41250.32541600627,
+  "p50_ms": 1.313,
+  "p95_ms": 5.861,
+  "p99_ms": 12.566,
+  "max_ms": 117.813,
+  "status_200": 2200,
+  "status_429": 822861,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 825061,
+  "server_rate_limited": 822861,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 31.3,
+  "load_avg_1m": 26.94
+}

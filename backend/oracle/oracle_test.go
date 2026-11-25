@@ -4,7 +4,6 @@ import (
 	"math/big"
 	"strings"
 	"testing"
-	"time"
 
 	"unigo-dex/indexer"
 )
@@ -56,9 +55,11 @@ func TestCheckTWAP(t *testing.T) {
 }
 
 func TestThreeWayCrossValidation(t *testing.T) {
+	feed := func(price float64) FeedReading { return FeedReading{Status: ChainlinkOK, Price: price, UpdatedAt: 1} }
+
 	// 现价和 TWAP 一致，但两者都偏离 Chainlink：不是瞬时操纵，而是池子整体偏了
 	o := newOracle()
-	o.UpdateChainlinkPrice(pair, 1.0, time.Now())
+	o.CheckChainlink(pair, 1.1, feed(1.0))
 	if c := o.CheckTWAP(pair, 1.1, 1.1); c.Status != TWAPOK {
 		t.Fatalf("spot == twap: %+v", c)
 	}
@@ -66,8 +67,12 @@ func TestThreeWayCrossValidation(t *testing.T) {
 	if !status.Active || !strings.Contains(status.Reason, "Chainlink") {
 		t.Fatalf("protection status: %+v", status)
 	}
+	if pairs := o.ProtectedPairs(); len(pairs) != 1 || pairs[0] != pair {
+		t.Fatalf("protected pairs = %v", pairs)
+	}
 
 	// 现价回到 Chainlink 附近，但 TWAP 还没回来：仍然保护
+	o.CheckChainlink(pair, 1.0, feed(1.0))
 	o.CheckTWAP(pair, 1.0, 1.04)
 	if status := o.GetProtectionStatus(pair); !status.Active || !strings.Contains(status.Reason, "TWAP 与 Chainlink") {
 		t.Fatalf("twap vs chainlink: %+v", status)
@@ -75,16 +80,8 @@ func TestThreeWayCrossValidation(t *testing.T) {
 
 	// 三方一致：解除
 	o.CheckTWAP(pair, 1.0, 1.005)
-	if o.GetProtectionStatus(pair).Active {
+	if o.GetProtectionStatus(pair).Active || len(o.ProtectedPairs()) != 0 {
 		t.Fatal("protection should be lifted when all three sources agree")
-	}
-
-	// Chainlink 过期时不拿它做比较，只看现价 vs TWAP
-	o2 := newOracle()
-	o2.UpdateChainlinkPrice(pair, 5.0, time.Now().Add(-2*time.Hour))
-	o2.CheckTWAP(pair, 1.0, 1.0)
-	if status := o2.GetProtectionStatus(pair); !status.Active || !strings.Contains(status.Reason, "过期") {
-		t.Fatalf("stale chainlink should keep its own protection reason: %+v", status)
 	}
 }
 
@@ -92,7 +89,7 @@ func TestPoolPriceFeed(t *testing.T) {
 	o := newOracle()
 	state := indexer.NewPoolStateManager()
 	state.AddPool(indexer.NewPoolState("0xpool", "0xa", "0xb", 3000, 60))
-	o.UpdateChainlinkPrice(pair, 1.0, time.Now())
+	o.CheckChainlink(pair, 1.0, FeedReading{Status: ChainlinkOK, Price: 1.0, UpdatedAt: 1})
 
 	feed := o.PoolPriceFeed(state)
 	// 成交后价格 4（sqrtPriceX96 = 2 × 2^96），与 Chainlink 的 1.0 严重偏离

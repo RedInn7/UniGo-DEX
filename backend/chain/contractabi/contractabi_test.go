@@ -14,8 +14,10 @@ func TestEmbeddedABIMatchesArtifacts(t *testing.T) {
 	for name, embedded := range map[string]string{
 		"UniGoPool": poolJSON, "UniGoFactory": factoryJSON, "UniGoManager": managerJSON,
 		"UniGoQuoter": quoterJSON, "FlashArbitrage": flashArbitrageJSON,
+		"test/AggregatorV3Interface":                    aggregatorJSON,
+		"../@openzeppelin/contracts/token/ERC20/IERC20": erc20JSON,
 	} {
-		raw, err := os.ReadFile(filepath.Join(artifacts, name+".sol", name+".json"))
+		raw, err := os.ReadFile(filepath.Join(artifacts, name+".sol", filepath.Base(name)+".json"))
 		if err != nil {
 			t.Skipf("没有编译产物，跳过（%v）", err)
 		}

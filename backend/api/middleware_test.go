@@ -41,3 +41,69 @@ func TestLoggingWriterSupportsStreaming(t *testing.T) {
 	}))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 }
+
+// 配置为每秒 n 个请求时，持续速率就是每秒 n 个，而不是用完突发量后每秒 1 个
+func TestRateLimitSustainedRate(t *testing.T) {
+	const perSecond = 50
+	rl := NewRateLimiter(perSecond, time.Second/perSecond)
+
+	allowed := 0
+	for i := 0; i < perSecond*3; i++ { // 先把突发量耗尽
+		if rl.Allow("10.0.0.9") {
+			allowed++
+		}
+	}
+	if allowed != perSecond {
+		t.Fatalf("burst allowed %d, want %d", allowed, perSecond)
+	}
+
+	time.Sleep(400 * time.Millisecond) // 应补回约 20 个
+	allowed = 0
+	for i := 0; i < perSecond; i++ {
+		if rl.Allow("10.0.0.9") {
+			allowed++
+		}
+	}
+	if allowed < 18 || allowed > 24 {
+		t.Fatalf("after 400ms allowed %d more, want about 20", allowed)
+	}
+}
+
+func TestLimitsCanBeDisabled(t *testing.T) {
+	s := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.MaxConcurrent, c.DisableAccessLog = 0, 0, true })
+	for i := 0; i < 500; i++ {
+		if code := s.do(t, "GET", "/health", "", nil); code != http.StatusOK {
+			t.Fatalf("request %d: %d", i, code)
+		}
+	}
+	limited := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.RateLimitBurst = 5, 5 })
+	rejected := 0
+	for i := 0; i < 50; i++ {
+		if limited.do(t, "GET", "/health", "", nil) == http.StatusTooManyRequests {
+			rejected++
+		}
+	}
+	if rejected < 40 {
+		t.Fatalf("rate limit of 5/s rejected only %d of 50 back-to-back requests", rejected)
+	}
+}
+
+// 经过完整的中间件链：突发容量用完之后，放行速率等于配置的每秒速率
+func TestRateLimitBurstThenSustainedRate(t *testing.T) {
+	s := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.RateLimitBurst, c.DisableAccessLog = 50, 80, true })
+	count := func(n int) (ok int) {
+		for i := 0; i < n; i++ {
+			if s.do(t, "GET", "/health", "", nil) == http.StatusOK {
+				ok++
+			}
+		}
+		return ok
+	}
+	if got := count(200); got < 80 || got > 84 {
+		t.Fatalf("burst let %d requests through, want about 80", got)
+	}
+	time.Sleep(500 * time.Millisecond) // 50/s × 0.5s ≈ 25 个
+	if got := count(200); got < 23 || got > 30 {
+		t.Fatalf("after 500ms %d more requests passed, want about 25", got)
+	}
+}

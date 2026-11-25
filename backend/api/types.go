@@ -16,17 +16,18 @@ type QuoteRequest struct {
 
 // QuoteResponse 报价响应
 type QuoteResponse struct {
-	AmountOut    string       `json:"amount_out"`
-	MinAmountOut string       `json:"min_amount_out"` // 按推荐滑点算出的最少应得数量
-	Slippage     float64      `json:"slippage"`       // 推荐滑点（池子近期被夹过时会收紧）
-	Path         []string     `json:"path"`
-	Fees         []uint32     `json:"fees"`         // 路径上每一跳的费率
-	PriceImpact  float64      `json:"price_impact"` // 价格冲击，0.01 = 1%
-	GasEstimate  uint64       `json:"gas_estimate"`
-	Gas          gas.Estimate `json:"gas"` // EIP-1559 口径的 Gas 成本评估
-	TicksCrossed int          `json:"ticks_crossed"`
-	IsDegraded   bool         `json:"is_degraded"` // 是否为降级路由
-	Warning      string       `json:"warning,omitempty"`
+	AmountOut    string           `json:"amount_out"`
+	MinAmountOut string           `json:"min_amount_out"` // 按推荐滑点算出的最少应得数量
+	Slippage     float64          `json:"slippage"`       // 推荐滑点（池子近期被夹过时会收紧）
+	Path         []string         `json:"path"`
+	Fees         []uint32         `json:"fees"`         // 路径上每一跳的费率
+	PriceImpact  float64          `json:"price_impact"` // 价格冲击，0.01 = 1%
+	GasEstimate  uint64           `json:"gas_estimate"`
+	Gas          gas.Estimate     `json:"gas"` // EIP-1559 口径的 Gas 成本评估
+	TicksCrossed int              `json:"ticks_crossed"`
+	IsDegraded   bool             `json:"is_degraded"`  // 是否为降级路由
+	PriceChecks  []PoolPriceCheck `json:"price_checks"` // 路径上每个池子的现价校验明细
+	Warning      string           `json:"warning,omitempty"`
 }
 
 // SwapRequest Swap 请求（含 EIP-712 签名）
@@ -94,6 +95,8 @@ type BuildSwapResponse struct {
 	OnchainAmountOut string `json:"onchain_amount_out,omitempty"`
 	QuoteConsistent  *bool  `json:"quote_consistent,omitempty"`
 
+	PriceChecks []PoolPriceCheck `json:"price_checks"` // 路径上每个池子的现价校验明细
+
 	Warning string `json:"warning,omitempty"`
 }
 
@@ -104,17 +107,29 @@ type KlineUpdate struct {
 	Candle   kline.Candle `json:"candle"`
 }
 
-// TWAPResponse 池子的 TWAP 与现价偏离
-type TWAPResponse struct {
-	Pool      string  `json:"pool"`
+// PoolPriceCheck 一个池子的现价校验明细
+//
+// 现价与两个独立参考价比较：池内 TWAP 和 Chainlink 喂价。sources 列出这次实际参与校验的价格源，
+// 三个都在是三方校验；某个参考价不可用时降级为两方，原因见对应的 detail 字段。
+type PoolPriceCheck struct {
+	Pool    string   `json:"pool"`
+	Spot    float64  `json:"spot"`    // 池内现价（token1 最小单位 / token0 最小单位）
+	Sources []string `json:"sources"` // 参与校验的价格源：spot / twap / chainlink
+
+	// TWAP
 	Status    string  `json:"status"` // ok / deviated / unavailable
-	Spot      float64 `json:"spot"`
 	TWAP      float64 `json:"twap,omitempty"`
 	Tick      int32   `json:"tick"`      // 窗口内的平均 tick
 	Window    uint32  `json:"window"`    // 实际使用的窗口（秒）
 	Degraded  bool    `json:"degraded"`  // 观测不足，窗口小于配置值
 	Deviation float64 `json:"deviation"` // |现价 - TWAP| / TWAP
 	Detail    string  `json:"detail,omitempty"`
+
+	// Chainlink
+	ChainlinkStatus    string  `json:"chainlink_status"`              // ok / deviated / unavailable / none（未配置）
+	Chainlink          float64 `json:"chainlink,omitempty"`           // 喂价，已换算成与 spot 相同的口径
+	ChainlinkDeviation float64 `json:"chainlink_deviation,omitempty"` // |现价 - 喂价| / 喂价
+	ChainlinkDetail    string  `json:"chainlink_detail,omitempty"`    // 不可用的原因
 }
 
 // SwapResponse Swap 响应

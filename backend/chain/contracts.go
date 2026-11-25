@@ -45,6 +45,11 @@ func isRevert(err error) bool {
 	return errors.As(err, &rpcErr)
 }
 
+// IsRejection 错误是否来自节点对请求的明确拒绝（交易无效、合约 revert 等），而不是节点不可达
+func IsRejection(err error) bool {
+	return isRevert(err)
+}
+
 // ChainID 返回链 ID
 func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
 	return call(c, func() (*big.Int, error) { return c.eth.ChainID(ctx) })
@@ -316,4 +321,60 @@ func EncodeArbitrage(lender, sellPool, buyPool, borrowToken string, amount, minP
 		Amount:      amount,
 		MinProfit:   minProfit,
 	})
+}
+
+// ===== Chainlink 喂价 =====
+
+// ChainlinkRound 聚合器 latestRoundData() 的返回值，外加读取时的最新区块时间
+type ChainlinkRound struct {
+	RoundID         *big.Int
+	Answer          *big.Int // 价格，按聚合器的 decimals 放大
+	StartedAt       uint64
+	UpdatedAt       uint64 // 该轮价格的更新时间；0 表示这一轮还没完成
+	AnsweredInRound *big.Int
+	BlockTime       uint64 // 最新区块的时间戳，判断喂价是否过期用它而不是本机时钟
+}
+
+// ChainlinkDecimals 读取聚合器的 decimals()
+func (c *Client) ChainlinkDecimals(ctx context.Context, feed string) (uint8, error) {
+	out, err := c.callContract(ctx, feed, &contractabi.Aggregator, "decimals")
+	if err != nil {
+		return 0, err
+	}
+	return out[0].(uint8), nil
+}
+
+// ChainlinkLatestRound 读取聚合器的 latestRoundData()
+func (c *Client) ChainlinkLatestRound(ctx context.Context, feed string) (*ChainlinkRound, error) {
+	out, err := c.callContract(ctx, feed, &contractabi.Aggregator, "latestRoundData")
+	if err != nil {
+		return nil, err
+	}
+	latest, err := c.LatestBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	block, err := c.BlockByNumber(ctx, latest)
+	if err != nil {
+		return nil, err
+	}
+	return &ChainlinkRound{
+		RoundID:         out[0].(*big.Int),
+		Answer:          out[1].(*big.Int),
+		StartedAt:       out[2].(*big.Int).Uint64(),
+		UpdatedAt:       out[3].(*big.Int).Uint64(),
+		AnsweredInRound: out[4].(*big.Int),
+		BlockTime:       uint64(block.Timestamp.Unix()),
+	}, nil
+}
+
+// ===== ERC20 =====
+
+// TokenBalance 读取 holder 持有的 token 余额（ERC20 balanceOf）
+func (c *Client) TokenBalance(ctx context.Context, token, holder string) (*big.Int, error) {
+	out, err := c.callContract(ctx, token, &contractabi.ERC20, "balanceOf", common.HexToAddress(holder))
+	if err != nil {
+		return nil, err
+	}
+	return out[0].(*big.Int), nil
 }

@@ -27,6 +27,7 @@ import (
 	"unigo-dex/indexer"
 	"unigo-dex/kline"
 	umath "unigo-dex/math"
+	"unigo-dex/metrics"
 	"unigo-dex/mev"
 	"unigo-dex/oracle"
 	"unigo-dex/router"
@@ -230,7 +231,7 @@ func TestSwapPreTradeProtection(t *testing.T) {
 		"min_out 过松": {func() string { return s.swapBody(t, tokenB, oneToken, "1", deadline, nil) }, http.StatusBadRequest, "min_amount_out too low"},
 		"没有路由": {func() string {
 			return s.swapBody(t, "0x00000000000000000000000000000000000000dd", "1000", "1", deadline, nil)
-		}, http.StatusBadRequest, "route search failed"},
+		}, http.StatusNotFound, "no route"},
 		"金额非法": {func() string { return s.swapBody(t, tokenB, "-5", minOut, deadline, nil) }, http.StatusBadRequest, "invalid amount_in"},
 		"raw_tx 不是合法交易": {func() string {
 			return s.swapBody(t, tokenB, oneToken, minOut, deadline, func(r *SwapRequest) { r.RawTx = "0x02" })
@@ -421,7 +422,7 @@ func TestBuildSwap(t *testing.T) {
 		"都不给":      {common + fmt.Sprintf(`,"token_out":%q`, tokenB), http.StatusBadRequest},
 		"地址非法":     {fmt.Sprintf(`"token_in":"abc","token_out":%q,"recipient":%q,"amount_in":"1"`, tokenB, recipient), http.StatusBadRequest},
 		"价格冲击过大":   {common + fmt.Sprintf(`,"token_out":%q,"amount_in":"100000000000000000000000"`, tokenB), http.StatusBadRequest},
-		"精确输出不能多跳": {common + fmt.Sprintf(`,"token_out":%q,"amount_out":"1000"`, tokenC), http.StatusBadRequest},
+		"精确输出不能多跳": {common + fmt.Sprintf(`,"token_out":%q,"amount_out":"1000"`, tokenC), http.StatusNotFound},
 	} {
 		if _, code, body := build(tc.fields); code != tc.code {
 			t.Errorf("%s: code = %d, body = %s", name, code, body)
@@ -507,7 +508,7 @@ func TestKlinesAndTradesEndpoints(t *testing.T) {
 	if code := s.do(t, "GET", "/api/v1/klines?pool=0x"+strings.ToUpper(testPool[2:])+"&interval=1m", "", &candles); code != http.StatusOK || len(candles) != 2 {
 		t.Fatalf("klines: code = %d, %+v", code, candles)
 	}
-	if candles[0].Close != 1 || candles[0].Volume0 != 100 || candles[0].Trades != 1 {
+	if candles[0].Close != 1 || candles[0].Volume0 != "100" || candles[0].Trades != 1 {
 		t.Fatalf("candle = %+v", candles[0])
 	}
 	if code := s.do(t, "GET", "/api/v1/klines?pool="+testPool+"&interval=1h&limit=1", "", &candles); code != http.StatusOK || len(candles) != 1 || candles[0].Trades != 2 {
@@ -529,6 +530,89 @@ func TestKlinesAndTradesEndpoints(t *testing.T) {
 		if code := s.do(t, "GET", url, "", nil); code != http.StatusBadRequest {
 			t.Errorf("%s: code = %d, want 400", url, code)
 		}
+	}
+}
+
+// 找不到路由是客户端错误（404），不能报成 500
+func TestQuoteNoRouteIsNotServerError(t *testing.T) {
+	s := newTestServer()
+	var resp ErrorResponse
+	url := "/api/v1/quote?token_in=" + tokenA + "&token_out=0x00000000000000000000000000000000000000dd&amount_in=1000"
+	if code := s.do(t, "GET", url, "", &resp); code != http.StatusNotFound || !strings.Contains(resp.Error, "no route") {
+		t.Fatalf("no route: %d %q", code, resp.Error)
+	}
+	// 流动性不足同理
+	url = "/api/v1/quote?token_in=" + tokenA + "&token_out=" + tokenB + "&amount_in=1000000000000000000000000000"
+	if code := s.do(t, "GET", url, "", &resp); code != http.StatusNotFound {
+		t.Fatalf("insufficient liquidity: %d %q", code, resp.Error)
+	}
+}
+
+// 每个请求都带 Trace ID：客户端传了就沿用，没传就生成，并写回响应头
+func TestTraceIDPropagation(t *testing.T) {
+	s := newTestServer()
+	trace := func(header string) string {
+		req := httptest.NewRequest("GET", "/health", nil)
+		if header != "" {
+			req.Header.Set("X-Trace-Id", header)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec.Header().Get("X-Trace-Id")
+	}
+	if got := trace("upstream-trace-0001"); got != "upstream-trace-0001" {
+		t.Fatalf("incoming trace id not propagated: %q", got)
+	}
+	generated := trace("")
+	if len(generated) != 24 || generated == trace("") {
+		t.Fatalf("generated trace id %q should be 24 hex chars and unique", generated)
+	}
+	// 含非法字符的 ID 不沿用，避免把任意内容写进日志
+	if got := trace("bad id\twith spaces"); got == "bad id\twith spaces" || len(got) != 24 {
+		t.Fatalf("malformed trace id should be replaced, got %q", got)
+	}
+}
+
+// HTTP 和缓存指标反映真实流量
+func TestHTTPAndCacheMetrics(t *testing.T) {
+	s := newTestServer()
+	requests, hits, misses := metrics.HTTPRequestsTotal.Value(), metrics.CacheHitsTotal.Value(), metrics.CacheMissesTotal.Value()
+	observed := metrics.HTTPRequestDuration.Count()
+
+	url := "/api/v1/quote?token_in=" + tokenA + "&token_out=" + tokenB + "&amount_in=1000000000000000000"
+	for i := 0; i < 5; i++ {
+		if code := s.do(t, "GET", url, "", nil); code != http.StatusOK {
+			t.Fatalf("quote: %d", code)
+		}
+	}
+	if got := metrics.HTTPRequestsTotal.Value() - requests; got != 5 {
+		t.Fatalf("http_requests_total grew by %d, want 5", got)
+	}
+	if got := metrics.HTTPRequestDuration.Count() - observed; got != 5 {
+		t.Fatalf("http_request_duration_ms observed %d, want 5", got)
+	}
+	// 同一个报价：第一次未命中，后四次命中
+	if h, m := metrics.CacheHitsTotal.Value()-hits, metrics.CacheMissesTotal.Value()-misses; h != 4 || m != 1 {
+		t.Fatalf("cache hits %d misses %d, want 4 and 1", h, m)
+	}
+	if metrics.HTTPActiveConnections.Value() != 0 {
+		t.Fatalf("http_active_connections = %d after all requests finished", metrics.HTTPActiveConnections.Value())
+	}
+
+	// 被限流拒绝的请求也计入总数，并单独计数
+	limited := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.RateLimitBurst = 1, 2 })
+	requests, rejected := metrics.HTTPRequestsTotal.Value(), metrics.HTTPRateLimited.Value()
+	for i := 0; i < 10; i++ {
+		limited.do(t, "GET", "/health", "", nil)
+	}
+	if total, r := metrics.HTTPRequestsTotal.Value()-requests, metrics.HTTPRateLimited.Value()-rejected; total != 10 || r != 8 {
+		t.Fatalf("total %d rate limited %d, want 10 and 8", total, r)
+	}
+
+	// 保护模式下的交易对出现在系统状态里
+	var status SystemStatus
+	if code := s.do(t, "GET", "/api/v1/status", "", &status); code != http.StatusOK || len(status.ProtectedPairs) != 0 {
+		t.Fatalf("status: %d %+v", code, status)
 	}
 }
 

@@ -67,12 +67,13 @@ type world struct {
 
 	lp, trader, bot, victim account
 
-	erc20, poolABI, managerABI artifact
+	erc20, poolABI, managerABI, aggregatorABI artifact
 
 	factory, manager, quoter, flashArb common.Address
 	tokenA, tokenB, tokenC             common.Address // 地址升序
 	poolAB3000, poolAB500              common.Address // 同一币对的两个池子（套利用）
 	poolBC3000, poolAC10000            common.Address
+	feedAB                             common.Address // 模拟的 Chainlink 聚合器：1 个 A 值多少 B
 
 	client   *chain.Client
 	state    *indexer.PoolStateManager
@@ -140,6 +141,10 @@ func deployWorld(t *testing.T) *world {
 	w.poolAB500 = createPool(w.tokenA, w.tokenB, 500)
 	w.poolBC3000 = createPool(w.tokenB, w.tokenC, 3000)
 	w.poolAC10000 = createPool(w.tokenA, w.tokenC, 10000)
+
+	// A/B 的 Chainlink 喂价：8 位小数，初始价格 1.0，与池子的初始价格一致
+	w.aggregatorABI = loadArtifact(t, "test/TestAggregator.sol", "TestAggregator")
+	w.feedAB = n.deploy(t, w.lp, w.aggregatorABI, uint8(8), "A / B", big.NewInt(1_00000000))
 
 	// 每个池子放一个宽区间打底，再叠几个窄区间和单边区间，让 swap 会穿越已初始化的 tick
 	for _, p := range []position{
@@ -215,6 +220,7 @@ func (w *world) startBackend(t *testing.T, ctx context.Context) {
 	arbConfig.FlashArbAddress = lower(w.flashArb)
 	arbConfig.WETH = lower(w.tokenA) // 把 A 当作 WETH，gas 成本可以折算成 A 或 B
 	scanner := arb.NewScanner(arbConfig, w.state, gasEstimator)
+	scanner.Balances = client
 
 	hub := ws.NewHub()
 	go hub.Run(ctx)
@@ -248,6 +254,11 @@ func (w *world) startBackend(t *testing.T, ctx context.Context) {
 		Router: w.router, State: w.state, Indexer: w.idx, Cache: cache.NewCache(30 * time.Second),
 		Oracle: oracleInst, Chain: client, Gas: gasEstimator, Klines: klines, Guard: guard,
 		Arb: scanner, Hub: hub, Verifier: w.verifier,
+		// 读数只缓存 10 毫秒，测试里改完喂价马上就能读到
+		Chainlink: oracle.NewChainlinkReader(client, []oracle.FeedConfig{{
+			Base: lower(w.tokenA), Quote: lower(w.tokenB), Address: w.feedAB.Hex(),
+			BaseDecimals: 18, QuoteDecimals: 18, Heartbeat: time.Hour,
+		}}, 10*time.Millisecond),
 	}).Handler())
 	t.Cleanup(w.server.Close)
 
@@ -804,18 +815,18 @@ func TestEndToEnd(t *testing.T) {
 		// K 线的成交笔数和成交量之和等于逐笔成交的合计（1h 周期同理）
 		for _, interval := range []string{"1m", "1h"} {
 			w.get(t, "/api/v1/klines?pool="+w.poolBC3000.Hex()+"&interval="+interval+"&limit=1000", &candles)
-			count, volume0 := 0, 0.0
+			count, volume0 := 0, new(big.Int)
 			for _, c := range candles {
 				count += c.Trades
-				volume0 += c.Volume0
+				volume0.Add(volume0, dec(c.Volume0))
 			}
-			wantVolume0 := 0.0
+			wantVolume0 := new(big.Int)
 			for _, tr := range trades {
-				v, _ := new(big.Float).SetInt(new(big.Int).Abs(dec(tr.Amount0))).Float64()
-				wantVolume0 += v
+				wantVolume0.Add(wantVolume0, new(big.Int).Abs(dec(tr.Amount0)))
 			}
-			if count != len(trades) || volume0 < wantVolume0*0.999999 || volume0 > wantVolume0*1.000001 {
-				t.Fatalf("%s K 线合计 %d 笔 / volume0=%v，逐笔成交 %d 笔 / %v", interval, count, volume0, len(trades), wantVolume0)
+			// 成交量是定点整数，合计必须一位不差
+			if count != len(trades) || volume0.Cmp(wantVolume0) != 0 {
+				t.Fatalf("%s K 线合计 %d 笔 / volume0=%s，逐笔成交 %d 笔 / %s", interval, count, volume0, len(trades), wantVolume0)
 			}
 		}
 
@@ -864,7 +875,7 @@ func TestEndToEnd(t *testing.T) {
 
 		// API 返回同样的读数；现价与 TWAP 很接近，状态正常
 		w.synced(t)
-		var reading api.TWAPResponse
+		var reading api.PoolPriceCheck
 		if code := w.get(t, "/api/v1/twap?pool="+pool.Hex(), &reading); code != http.StatusOK {
 			t.Fatalf("查询 TWAP: %d", code)
 		}
@@ -929,7 +940,7 @@ func TestEndToEnd(t *testing.T) {
 		if code := w.get(t, path, &quote); code != http.StatusOK || !strings.Contains(quote.Warning, "疑似被单区块操纵") {
 			t.Fatalf("报价应带操纵警告: %d %q", code, quote.Warning)
 		}
-		var reading api.TWAPResponse
+		var reading api.PoolPriceCheck
 		w.get(t, "/api/v1/twap?pool="+pool.Hex(), &reading)
 		if reading.Status != oracle.TWAPDeviated || reading.Deviation < 0.05 {
 			t.Fatalf("TWAP 读数应为偏离: %+v", reading)
@@ -1109,6 +1120,111 @@ func TestEndToEnd(t *testing.T) {
 		}
 		if count != len(trades) || candles[len(candles)-1].Close != trades[0].Price {
 			t.Fatalf("回滚后 K 线合计 %d 笔，成交记录 %d 笔", count, len(trades))
+		}
+	})
+
+	t.Run("Chainlink喂价三方校验与降级", func(t *testing.T) {
+		pool := w.poolAB500
+		build := func(out interface{}) int {
+			return w.post(t, "/api/v1/swap/build", api.BuildSwapRequest{
+				// 用精确输出：只走 A/B 直连池。精确输入的话路由可能绕道 A→C→B，那条路上没有喂价
+				TokenIn: w.tokenA.Hex(), TokenOut: w.tokenB.Hex(), AmountOut: e18(1).String(),
+				Slippage: 0.01, Deadline: deadline(), Recipient: w.trader.addr.Hex(),
+			}, out)
+		}
+		// setFeed 把喂价设成池子现价的 factor 倍（8 位小数），更新时间为当前区块
+		setFeed := func(factor float64) {
+			answer := big.NewInt(int64(w.price(t, pool) * factor * 1e8))
+			w.n.invoke(t, w.lp, w.feedAB, w.aggregatorABI.ABI, "setAnswer", answer)
+			time.Sleep(20 * time.Millisecond) // 等读数缓存过期
+		}
+		// checkOf 取出 A/B 池的校验明细（两个 A/B 池价格相差不到 1%，路由选哪个都可以）
+		checkOf := func(checks []api.PoolPriceCheck) api.PoolPriceCheck {
+			for _, c := range checks {
+				if c.Pool == lower(w.poolAB500) || c.Pool == lower(w.poolAB3000) {
+					return c
+				}
+			}
+			t.Fatalf("路由没有经过 A/B 池: %+v", checks)
+			return api.PoolPriceCheck{}
+		}
+
+		// 让 TWAP 也可用：池子的 tick 保持不变过了 200 秒
+		w.n.setNextTimestamp(t, w.n.latestTimestamp(t)+200)
+		w.n.mine(t)
+
+		// 1. 喂价正常：现价 / TWAP / Chainlink 三方都参与校验，交易放行
+		setFeed(1.0)
+		w.synced(t)
+		var reading api.PoolPriceCheck
+		if code := w.get(t, "/api/v1/twap?pool="+pool.Hex(), &reading); code != http.StatusOK {
+			t.Fatalf("查询校验明细: %d", code)
+		}
+		if reading.ChainlinkStatus != oracle.ChainlinkOK || reading.Status != oracle.TWAPOK ||
+			strings.Join(reading.Sources, ",") != "spot,chainlink,twap" || reading.ChainlinkDeviation > 0.0001 {
+			t.Fatalf("喂价正常时应是三方校验: %+v", reading)
+		}
+		// 喂价按 8 位小数归一化后与池子现价同口径
+		if diff := (reading.Chainlink - reading.Spot) / reading.Spot; diff > 1e-7 || diff < -1e-7 {
+			t.Fatalf("喂价换算后 %v，池子现价 %v", reading.Chainlink, reading.Spot)
+		}
+		var built api.BuildSwapResponse
+		if code := build(&built); code != http.StatusOK {
+			t.Fatalf("喂价正常时应能构造交易: %d %+v", code, built)
+		}
+		if c := checkOf(built.PriceChecks); c.ChainlinkStatus != oracle.ChainlinkOK || len(c.Sources) != 3 {
+			t.Fatalf("响应里的校验明细: %+v", c)
+		}
+
+		// 2. 喂价比池价高 10%：池价偏离喂价，交易被拒
+		setFeed(1.10)
+		var rejected api.ErrorResponse
+		if code := build(&rejected); code != http.StatusForbidden || !strings.Contains(rejected.Error, "偏离 Chainlink 喂价") {
+			t.Fatalf("池价偏离喂价时应拒绝: %d %q", code, rejected.Error)
+		}
+		w.get(t, "/api/v1/twap?pool="+pool.Hex(), &reading)
+		if reading.ChainlinkStatus != oracle.ChainlinkDeviated || reading.ChainlinkDeviation < 0.08 || reading.Status != oracle.TWAPOK {
+			t.Fatalf("校验明细应为喂价偏离、TWAP 正常: %+v", reading)
+		}
+		t.Logf("喂价偏离：池价 %.6f，Chainlink %.6f，偏离 %.2f%%，交易被拒绝", reading.Spot, reading.Chainlink, reading.ChainlinkDeviation*100)
+
+		// 3. 各种不可用的喂价：降级为现价 vs TWAP 两方校验，交易放行并说明原因
+		now := w.n.latestTimestamp(t)
+		good := big.NewInt(int64(w.price(t, pool) * 1.10 * 1e8)) // 数值仍是偏离 10% 的坏价格：不可用时不能拿它来拒绝交易
+		for name, tc := range map[string]struct {
+			roundID, answer            *big.Int
+			updatedAt, answeredInRound uint64
+			reason                     string
+		}{
+			"过期":      {big.NewInt(50), good, now - 7200, 50, "已过期"},
+			"轮次未完成":   {big.NewInt(51), good, 0, 51, "轮次未完成"},
+			"答案来自旧轮次": {big.NewInt(52), good, now, 51, "旧轮次"},
+			"价格为负":    {big.NewInt(53), big.NewInt(-1), now, 53, "不是正数"},
+		} {
+			w.n.invoke(t, w.lp, w.feedAB, w.aggregatorABI.ABI, "setRoundData",
+				tc.roundID, tc.answer, new(big.Int).SetUint64(now), new(big.Int).SetUint64(tc.updatedAt), new(big.Int).SetUint64(tc.answeredInRound))
+			time.Sleep(20 * time.Millisecond)
+			w.synced(t)
+
+			var built api.BuildSwapResponse // 每次用新的变量：omitempty 的字段不会覆盖上一次的值
+			if code := build(&built); code != http.StatusOK {
+				t.Fatalf("%s: 喂价不可用时应降级放行，实际 %d %+v", name, code, built)
+			}
+			c := checkOf(built.PriceChecks)
+			if c.ChainlinkStatus != oracle.ChainlinkUnavailable || !strings.Contains(c.ChainlinkDetail, tc.reason) ||
+				c.Chainlink != 0 || strings.Join(c.Sources, ",") != "spot,twap" {
+				t.Fatalf("%s: 校验明细 %+v", name, c)
+			}
+			if !strings.Contains(built.Warning, "Chainlink 喂价不可用") || !strings.Contains(built.Warning, tc.reason) {
+				t.Fatalf("%s: 响应应说明降级原因，warning=%q", name, built.Warning)
+			}
+		}
+
+		// 4. 喂价恢复正常：回到三方校验
+		setFeed(1.0)
+		built = api.BuildSwapResponse{}
+		if code := build(&built); code != http.StatusOK || checkOf(built.PriceChecks).ChainlinkStatus != oracle.ChainlinkOK {
+			t.Fatalf("喂价恢复后: %d %+v", code, built.PriceChecks)
 		}
 	})
 

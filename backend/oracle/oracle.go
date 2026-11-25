@@ -3,6 +3,7 @@ package oracle
 import (
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,15 +17,15 @@ import (
 // === 设计理念：不盲信任何单一价格源 ===
 //
 // 在 DeFi 系统中，价格信息来自多个源头：
-//   1. 链上池内价格（AMM sqrtPriceX96）—— 实时但可被操纵（闪电贷攻击）
-//   2. Chainlink 预言机价格 —— 可信但有滞后（心跳间隔 1-24 小时）
-//   3. 链下 CEX 价格 —— 参考用
+//   1. 链上池内现价（AMM sqrtPriceX96）—— 实时，但能在单个区块内被闪电贷拉偏
+//   2. 池内 TWAP —— 同一个池子的时间加权均价，要整个窗口都顶住价格才会动
+//   3. Chainlink 预言机价格 —— 独立于池子，可信但有滞后（心跳间隔 1-24 小时）
 //
 // 本模块实现 "有效性校验 + 保护模式"，确保价格安全：
 //
-//   1. Chainlink 有效性检查
-//      - 不仅读取 price，还校验 updatedAt
-//      - 若 CurrentTime - updatedAt > StaleThreshold，判定价格失效
+//   1. Chainlink 有效性检查（见 chainlink.go）
+//      - 不只读 answer，还校验 updatedAt、轮次是否完成、是否超过心跳阈值
+//      - 不可用的喂价不参与校验，三方降级为两方
 //
 //   2. 三方交叉验证：池内现价 / 池内 TWAP / Chainlink
 //      - 现价 vs Chainlink：偏离超过 MaxDeviation 触发保护模式
@@ -33,9 +34,8 @@ import (
 //        两者偏离超过 MaxTWAPDeviation 视为疑似单区块操纵，交易前检查直接拒绝
 //
 //   3. 保护模式（Fail-safe）
-//      - 暂停自动路由
-//      - 强制用户手动设置严格滑点
-//      - 防止利用过期/被操纵价格进行套利
+//      - 任意一组价格偏离超过阈值就进入，至少持续 ProtectionCooldown
+//      - 期间要求请求带足够的滑点保护，否则拒绝
 
 // PriceSource 价格来源标识
 type PriceSource int
@@ -43,7 +43,6 @@ type PriceSource int
 const (
 	SourceChainlink PriceSource = iota
 	SourcePool
-	SourceCEX
 	SourceTWAP
 )
 
@@ -52,15 +51,10 @@ type PriceData struct {
 	Price     float64     // 价格
 	Source    PriceSource // 来源
 	UpdatedAt time.Time   // 更新时间
-	IsStale   bool        // 是否已过期
 }
 
 // OracleConfig 预言机配置
 type OracleConfig struct {
-	// StaleThreshold Chainlink 价格过期阈值
-	// 若 time.Now() - updatedAt > StaleThreshold，判定价格失效
-	StaleThreshold time.Duration
-
 	// MaxDeviation 最大允许偏离度（百分比）
 	// 池内价格与 Chainlink 偏离超过此值触发保护模式
 	MaxDeviation float64
@@ -76,19 +70,18 @@ type OracleConfig struct {
 // DefaultOracleConfig 返回默认配置
 func DefaultOracleConfig() OracleConfig {
 	return OracleConfig{
-		StaleThreshold:     1 * time.Hour,   // Chainlink 1 小时未更新视为过期
-		MaxDeviation:       0.02,             // 2% 偏离触发保护
-		MaxTWAPDeviation:   0.05,             // 现价偏离 TWAP 5% 视为疑似操纵
-		ProtectionCooldown: 5 * time.Minute,  // 保护模式至少 5 分钟
+		MaxDeviation:       0.02,            // 2% 偏离触发保护
+		MaxTWAPDeviation:   0.05,            // 现价偏离 TWAP 5% 视为疑似操纵
+		ProtectionCooldown: 5 * time.Minute, // 保护模式至少 5 分钟
 	}
 }
 
 // ProtectionStatus 保护模式状态
 type ProtectionStatus struct {
-	Active     bool      // 是否处于保护模式
-	Reason     string    // 触发原因
+	Active      bool      // 是否处于保护模式
+	Reason      string    // 触发原因
 	ActivatedAt time.Time // 激活时间
-	Deviation  float64   // 当前偏离度
+	Deviation   float64   // 当前偏离度
 }
 
 // Oracle 价格预言机验证器
@@ -117,29 +110,6 @@ func NewOracle(config OracleConfig) *Oracle {
 	}
 }
 
-// UpdateChainlinkPrice 更新 Chainlink 预言机价格
-//
-// 关键：不只存储价格，还记录 updatedAt 用于有效性校验
-func (o *Oracle) UpdateChainlinkPrice(pair string, price float64, updatedAt time.Time) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	isStale := time.Since(updatedAt) > o.config.StaleThreshold
-
-	o.chainlinkPrices[pair] = &PriceData{
-		Price:     price,
-		Source:    SourceChainlink,
-		UpdatedAt: updatedAt,
-		IsStale:   isStale,
-	}
-
-	if isStale {
-		o.activateProtection(pair, fmt.Sprintf(
-			"Chainlink 价格过期：上次更新于 %v（阈值 %v）",
-			updatedAt.Format(time.RFC3339), o.config.StaleThreshold))
-	}
-}
-
 // UpdatePoolPrice 更新池内价格
 func (o *Oracle) UpdatePoolPrice(pair string, price float64) {
 	o.mu.Lock()
@@ -149,10 +119,9 @@ func (o *Oracle) UpdatePoolPrice(pair string, price float64) {
 		Price:     price,
 		Source:    SourcePool,
 		UpdatedAt: time.Now(),
-		IsStale:   false,
 	}
 
-	// 交叉验证：与 Chainlink 价格对比
+	// 交叉验证：与 Chainlink、TWAP 对比
 	o.crossValidate(pair)
 }
 
@@ -164,11 +133,6 @@ func (o *Oracle) crossValidate(pair string) {
 	chainlink := o.chainlinkPrices[pair]
 	pool := o.poolPrices[pair]
 	twap := o.twapPrices[pair]
-	stale := chainlink != nil && chainlink.IsStale
-	if stale {
-		// 过期的 Chainlink 价格不参与比较；过期本身已触发保护，在它更新之前不解除
-		chainlink = nil
-	}
 
 	deviation := func(a, b *PriceData) float64 { return math.Abs(a.Price-b.Price) / b.Price }
 
@@ -190,7 +154,7 @@ func (o *Oracle) crossValidate(pair string) {
 
 	if reason != "" {
 		o.activateProtection(pair, reason)
-	} else if !stale && pool != nil && (chainlink != nil || twap != nil) {
+	} else if pool != nil && (chainlink != nil || twap != nil) {
 		o.tryDeactivateProtection(pair)
 	}
 }
@@ -234,6 +198,63 @@ func (o *Oracle) CheckTWAP(pair string, spot, twap float64) TWAPCheck {
 	}
 	return check
 }
+
+// ChainlinkCheck 用 Chainlink 喂价校验池内现价的结果
+type ChainlinkCheck struct {
+	Status    string  // ok / deviated / unavailable / none
+	Price     float64 // 喂价（池子口径）
+	Deviation float64 // |现价 - 喂价| / 喂价
+	Detail    string  // 不可用时的原因
+}
+
+// CheckChainlink 用一次喂价读数校验池内现价，并更新三方交叉验证里 Chainlink 这一方
+//
+//   - 喂价有效：记入交叉验证；现价偏离超过 MaxDeviation 返回 deviated
+//   - 喂价不可用：把这个币对的 Chainlink 价格清掉，交叉验证降级为现价 vs TWAP 两方
+//   - 没有配置喂价：什么都不动
+func (o *Oracle) CheckChainlink(pair string, spot float64, reading FeedReading) ChainlinkCheck {
+	check := ChainlinkCheck{Status: reading.Status, Detail: reading.Detail}
+	switch reading.Status {
+	case ChainlinkOK:
+		o.mu.Lock()
+		o.chainlinkPrices[pair] = &PriceData{
+			Price: reading.Price, Source: SourceChainlink, UpdatedAt: time.Unix(int64(reading.UpdatedAt), 0),
+		}
+		o.poolPrices[pair] = &PriceData{Price: spot, Source: SourcePool, UpdatedAt: time.Now()}
+		o.crossValidate(pair)
+		o.mu.Unlock()
+
+		check.Price = reading.Price
+		check.Deviation = math.Abs(spot-reading.Price) / reading.Price
+		if check.Deviation > o.config.MaxDeviation {
+			check.Status = ChainlinkDeviated
+			metrics.OracleChainlinkDeviations.Inc()
+		}
+	case ChainlinkUnavailable:
+		o.mu.Lock()
+		delete(o.chainlinkPrices, pair)
+		o.mu.Unlock()
+		metrics.OracleChainlinkUnavailable.Inc()
+	}
+	return check
+}
+
+// ProtectedPairs 当前处于保护模式的交易对（按字典序）
+func (o *Oracle) ProtectedPairs() []string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	var pairs []string
+	for pair, status := range o.protectionStatus {
+		if status.Active {
+			pairs = append(pairs, pair)
+		}
+	}
+	sort.Strings(pairs)
+	return pairs
+}
+
+// MaxDeviation 现价相对 Chainlink 的最大允许偏离
+func (o *Oracle) MaxDeviation() float64 { return o.config.MaxDeviation }
 
 // PairKey 交易对在预言机里的 key：按池子的 token0/token1 顺序，价格是 token1/token0
 func PairKey(token0, token1 string) string {
@@ -314,12 +335,12 @@ func (o *Oracle) ValidateSwap(pair string, requestedSlippage float64) (allowed b
 
 		if requestedSlippage < minSlippage {
 			return false, minSlippage, fmt.Sprintf(
-				"⚠️ 保护模式已激活（%s）。当前价格可能不可靠，请设置至少 %.1f%% 的滑点保护。",
+				"保护模式已激活（%s）。当前价格可能不可靠，请设置至少 %.1f%% 的滑点保护。",
 				status.Reason, minSlippage*100)
 		}
 
 		return true, requestedSlippage, fmt.Sprintf(
-			"⚠️ 注意：保护模式已激活（%s）。请确认你了解风险。", status.Reason)
+			"注意：保护模式已激活（%s）。请确认你了解风险。", status.Reason)
 	}
 
 	return true, requestedSlippage, ""

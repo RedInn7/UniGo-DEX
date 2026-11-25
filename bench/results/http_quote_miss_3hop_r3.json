@@ -1,0 +1,22 @@
+{
+  "scenario": "quote_miss_3hop",
+  "label": "r3",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 222018,
+  "rps": 11097.582377748173,
+  "p50_ms": 8.042,
+  "p95_ms": 18.716,
+  "p99_ms": 25.336489999999994,
+  "max_ms": 98.281,
+  "status_200": 222018,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 222018,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 110.2,
+  "load_avg_1m": 32.45
+}

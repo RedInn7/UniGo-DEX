@@ -31,9 +31,13 @@ func TestPoolBasic(t *testing.T) {
 		t.Fatalf("expected 100 tasks completed, got %d", count.Load())
 	}
 
-	stats := pool.Stats()
-	if stats.Completed != 100 {
-		t.Fatalf("expected 100 completed in stats, got %d", stats.Completed)
+	// 完成计数在任务函数返回之后才累加，wg.Wait 返回时最后一个可能还没记上，这里等它追平
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.Stats().Completed != 100 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := pool.Stats().Completed; got != 100 {
+		t.Fatalf("expected 100 completed in stats, got %d", got)
 	}
 }
 

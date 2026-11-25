@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -33,7 +33,6 @@ import (
 //   GET  /api/v1/quote         — 获取交易报价
 //   POST /api/v1/swap          — 提交交易（含 EIP-712 签名验证）
 //   GET  /api/v1/pools         — 获取所有池子信息
-//   GET  /api/v1/pool/:address — 获取单个池子详情
 //   GET  /api/v1/status        — 系统状态（索引器、路由器、保护模式）
 //   GET  /api/v1/tx/{hash}     — 交易状态（pending / pending_confirmation / confirmed / reverted）
 //   GET  /api/v1/klines        — K 线（pool, interval, limit）
@@ -48,17 +47,20 @@ import (
 //
 // 架构特点：
 //   - 标准库 net/http（无外部依赖）
-//   - 中间件链：CORS → Logging → RateLimit → ConcurrencyLimit → Handler
+//   - 中间件链：CORS → Trace → Metrics → Logging → RateLimit → ConcurrencyLimit → Handler
 //   - 所有响应使用 JSON 格式
 //   - 错误统一通过 ErrorResponse 返回
 
 // ServerConfig API 服务器配置
 type ServerConfig struct {
 	Port           int
-	MaxConcurrent  int // 最大并发请求数
-	RateLimitPerIP int // 每 IP 每秒请求限制
-	ReadTimeout    time.Duration
-	WriteTimeout   time.Duration
+	MaxConcurrent  int // 最大并发请求数，0 = 不限
+	RateLimitPerIP int // 每 IP 的持续速率（请求/秒），0 = 不限流
+	RateLimitBurst int // 每 IP 的突发容量（令牌桶大小），0 = 与速率相同
+
+	DisableAccessLog bool // 关闭逐请求的访问日志
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
 
 	ManagerAddress string // UniGoManager 地址：待签名交易的目标，也是 EIP-712 的 verifyingContract
 	QuoterAddress  string // UniGoQuoter 地址：配置后对链下报价做链上一致性抽检
@@ -73,6 +75,7 @@ func DefaultServerConfig() ServerConfig {
 		Port:           8080,
 		MaxConcurrent:  500,
 		RateLimitPerIP: 100,
+		RateLimitBurst: 200,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   30 * time.Second,
 		TWAPWindow:     600,
@@ -94,6 +97,8 @@ type Deps struct {
 	Arb      *arb.Scanner
 	Hub      *ws.Hub
 	Verifier *eip712.Verifier
+	// Chainlink 喂价读取器；nil 表示没有配置任何喂价
+	Chainlink *oracle.ChainlinkReader
 }
 
 // Server API 服务器
@@ -111,25 +116,27 @@ type Server struct {
 	arb        *arb.Scanner
 	hub        *ws.Hub
 	verifier   *eip712.Verifier
+	chainlink  *oracle.ChainlinkReader
 	httpServer *http.Server
 }
 
 // NewServer 创建 API 服务器
 func NewServer(config ServerConfig, deps Deps) *Server {
 	return &Server{
-		config:   config,
-		router:   deps.Router,
-		state:    deps.State,
-		idxer:    deps.Indexer,
-		cache:    deps.Cache,
-		oracle:   deps.Oracle,
-		chain:    deps.Chain,
-		gas:      deps.Gas,
-		klines:   deps.Klines,
-		guard:    deps.Guard,
-		arb:      deps.Arb,
-		hub:      deps.Hub,
-		verifier: deps.Verifier,
+		config:    config,
+		router:    deps.Router,
+		state:     deps.State,
+		idxer:     deps.Indexer,
+		cache:     deps.Cache,
+		oracle:    deps.Oracle,
+		chain:     deps.Chain,
+		gas:       deps.Gas,
+		klines:    deps.Klines,
+		guard:     deps.Guard,
+		arb:       deps.Arb,
+		hub:       deps.Hub,
+		verifier:  deps.Verifier,
+		chainlink: deps.Chainlink,
 	}
 }
 
@@ -154,17 +161,24 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /metrics", metrics.DefaultRegistry.Handler())
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// 构建中间件链
-	concLimiter := NewConcurrencyLimiter(s.config.MaxConcurrent)
-	rateLimiter := NewRateLimiter(s.config.RateLimitPerIP, time.Second)
-
-	return CORSMiddleware(
-		LoggingMiddleware(
-			rateLimiter.Middleware(
-				concLimiter.Middleware(mux),
-			),
-		),
-	)
+	// 构建中间件链：CORS → Trace → Metrics → Logging → RateLimit → ConcurrencyLimit → Handler
+	// 两个限制都可以用 0 关闭（压测吞吐上限、或由前置网关负责限流时使用）
+	var handler http.Handler = mux
+	if s.config.MaxConcurrent > 0 {
+		handler = NewConcurrencyLimiter(s.config.MaxConcurrent).Middleware(handler)
+	}
+	if rate := s.config.RateLimitPerIP; rate > 0 {
+		// 令牌桶：每 1/rate 秒补 1 个令牌（持续速率 rate 请求/秒），桶里最多攒 burst 个（突发容量）
+		burst := s.config.RateLimitBurst
+		if burst <= 0 {
+			burst = rate
+		}
+		handler = NewRateLimiter(burst, time.Second/time.Duration(rate)).Middleware(handler)
+	}
+	if !s.config.DisableAccessLog {
+		handler = LoggingMiddleware(handler)
+	}
+	return CORSMiddleware(TraceMiddleware(MetricsMiddleware(handler)))
 }
 
 // Start 启动 HTTP 服务器
@@ -176,7 +190,7 @@ func (s *Server) Start() error {
 		WriteTimeout: s.config.WriteTimeout,
 	}
 
-	log.Printf("[API] 服务器启动在 :%d", s.config.Port)
+	slog.Info("API 服务器启动", "port", s.config.Port)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -231,7 +245,8 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 
 	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "route search failed: "+err.Error())
+		// 找不到可成交的路径是请求本身的问题（币对不存在、流动性不足），不是服务器故障
+		writeError(w, http.StatusNotFound, "no route: "+err.Error())
 		return
 	}
 
@@ -252,6 +267,7 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		Gas:          s.gas.Estimate(r.Context(), route.GasEstimate),
 		TicksCrossed: route.TicksCrossed,
 		IsDegraded:   route.IsDegraded,
+		PriceChecks:  safety.checks,
 		Warning:      joinWarnings(safety.warning, mevWarning),
 	}
 
@@ -329,7 +345,7 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	// 没有报价就无法评估价格冲击，不放行
 	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "route search failed: "+err.Error())
+		writeError(w, http.StatusNotFound, "no route: "+err.Error())
 		return
 	}
 
@@ -381,7 +397,12 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 		}
 		txHash, err := s.chain.SendRawTransaction(r.Context(), req.RawTx)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "broadcast failed: "+err.Error())
+			// 节点明确拒绝这笔交易（nonce 不对、余额不足等）是客户端的问题；连不上节点才是网关错误
+			if chain.IsRejection(err) {
+				writeError(w, http.StatusBadRequest, "transaction rejected by node: "+err.Error())
+			} else {
+				writeError(w, http.StatusBadGateway, "broadcast failed: "+err.Error())
+			}
 			return
 		}
 		resp.TxHash = txHash
@@ -510,6 +531,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		RouterDegradedRequests: routerStats.DegradedRequests,
 		RouterAvgLatencyMs:     routerStats.AvgLatencyMs,
 		CacheEnabled:           true,
+		ProtectedPairs:         s.oracle.ProtectedPairs(),
 	}
 
 	writeJSON(w, http.StatusOK, status)

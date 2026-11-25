@@ -32,6 +32,6 @@ func (s *simSource) BlockByNumber(ctx context.Context, number uint64) (*BlockInf
 	return block, nil
 }
 
-func (s *simSource) BlockEvents(ctx context.Context, block *BlockInfo) ([]interface{}, error) {
-	return nil, nil
+func (s *simSource) BlockEvents(ctx context.Context, blocks []*BlockInfo) ([][]interface{}, error) {
+	return make([][]interface{}, len(blocks)), nil
 }

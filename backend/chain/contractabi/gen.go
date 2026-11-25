@@ -18,12 +18,21 @@ import (
 	"path/filepath"
 )
 
-var contracts = []string{"UniGoPool", "UniGoFactory", "UniGoManager", "UniGoQuoter", "FlashArbitrage"}
+// 合约名 -> 编译产物相对 artifacts/contracts 的目录
+var contracts = map[string]string{
+	"UniGoPool":             "UniGoPool.sol",
+	"UniGoFactory":          "UniGoFactory.sol",
+	"UniGoManager":          "UniGoManager.sol",
+	"UniGoQuoter":           "UniGoQuoter.sol",
+	"FlashArbitrage":        "FlashArbitrage.sol",
+	"AggregatorV3Interface": filepath.Join("test", "AggregatorV3Interface.sol"),
+	"IERC20":                filepath.Join("..", "@openzeppelin", "contracts", "token", "ERC20", "IERC20.sol"),
+}
 
 func main() {
 	artifacts := filepath.Join("..", "..", "..", "contracts", "artifacts", "contracts")
-	for _, name := range contracts {
-		raw, err := os.ReadFile(filepath.Join(artifacts, name+".sol", name+".json"))
+	for name, dir := range contracts {
+		raw, err := os.ReadFile(filepath.Join(artifacts, dir, name+".json"))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "读取编译产物失败（先执行 npx hardhat compile）:", err)
 			os.Exit(1)

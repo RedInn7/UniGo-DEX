@@ -1,0 +1,6 @@
+BenchmarkReplay/indexer_only-8         	      37	  29149091 ns/op	     68613 blocks/s	    686128 events/s	25752973 B/op	  270321 allocs/op
+BenchmarkReplay/indexer_only-8         	      39	  28868316 ns/op	     69280 blocks/s	    692802 events/s	25752953 B/op	  270322 allocs/op
+BenchmarkReplay/indexer_only-8         	      40	  31559919 ns/op	     63372 blocks/s	    633716 events/s	25752337 B/op	  270320 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      21	  52779530 ns/op	     37894 blocks/s	    378935 events/s	48812472 B/op	  692728 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      20	  57833575 ns/op	     34582 blocks/s	    345820 events/s	48812216 B/op	  692729 allocs/op
+BenchmarkReplay/with_kline_mev_oracle-8         	      21	  52636530 ns/op	     37996 blocks/s	    379965 events/s	48812627 B/op	  692727 allocs/op

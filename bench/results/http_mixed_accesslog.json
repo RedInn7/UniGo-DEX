@@ -1,0 +1,22 @@
+{
+  "scenario": "mixed",
+  "label": "accesslog",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 502338,
+  "rps": 25108.99568815737,
+  "p50_ms": 2.6,
+  "p95_ms": 11.595,
+  "p99_ms": 20.060629999999996,
+  "max_ms": 88.062,
+  "status_200": 502338,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 502338,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 80.0,
+  "load_avg_1m": 24.16
+}

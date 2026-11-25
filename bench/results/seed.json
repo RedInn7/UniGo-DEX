@@ -1,0 +1,10 @@
+{
+  "swaps": 3000,
+  "failed": 0,
+  "perBlock": 5,
+  "blockSeconds": 12,
+  "headBlock": 679,
+  "headTimestamp": 1795599810,
+  "ethUsd": 1998.911988206995,
+  "seedSeconds": 7.907
+}

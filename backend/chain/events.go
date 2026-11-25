@@ -2,6 +2,8 @@ package chain
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"strings"
@@ -41,22 +43,37 @@ func eventByID(id common.Hash) (*abi.Event, bool) {
 	return nil, false
 }
 
-// BlockEvents 拉取并解码指定区块内的事件，按 logIndex 升序
+// ErrReorged 读取日志期间链发生了重组：日志所属的区块已经不是调用方手里的那个区块
+var ErrReorged = errors.New("chain reorganized while reading logs")
+
+// BlockEvents 一次 eth_getLogs 拉取一段连续区块内的事件并解码
 //
-// 用区块哈希过滤：区块若已被 Reorg 掉，节点会报错而不是返回另一条分叉上的日志。
-func (c *Client) BlockEvents(ctx context.Context, block *indexer.BlockInfo) ([]interface{}, error) {
-	// 已知上限：每个区块一次 FilterLogs，追大量历史区块偏慢；需要时改成按区块范围批量拉取
-	hash := common.HexToHash(block.Hash)
+// 结果与 blocks 一一对应，每个区块内按 logIndex 升序。
+// 按区块号范围查询拿到的是节点当前主链上的日志，所以要逐条核对日志的 blockHash
+// 与调用方给的区块头一致；对不上说明这期间发生了重组，返回 ErrReorged 让调用方重读。
+func (c *Client) BlockEvents(ctx context.Context, blocks []*indexer.BlockInfo) ([][]interface{}, error) {
+	events := make([][]interface{}, len(blocks))
+	if len(blocks) == 0 {
+		return events, nil
+	}
+	first, last := blocks[0].Number, blocks[len(blocks)-1].Number
 	logs, err := c.FilterLogs(ctx, ethereum.FilterQuery{
-		BlockHash: &hash,
+		FromBlock: new(big.Int).SetUint64(first),
+		ToBlock:   new(big.Int).SetUint64(last),
 		Topics:    [][]common.Hash{eventTopics},
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	events := make([]interface{}, 0, len(logs))
 	for _, lg := range logs {
+		if lg.BlockNumber < first || lg.BlockNumber > last {
+			return nil, fmt.Errorf("节点返回了查询范围之外的日志（区块 %d）", lg.BlockNumber)
+		}
+		block := blocks[lg.BlockNumber-first]
+		if lg.BlockHash.Hex() != block.Hash {
+			return nil, fmt.Errorf("%w: 区块 %d", ErrReorged, lg.BlockNumber)
+		}
 		event, err := c.decodeLog(lg, uint64(block.Timestamp.Unix()))
 		if err != nil {
 			// 任何合约都能发出签名相同但内容畸形的日志，跳过即可，不能卡住索引
@@ -64,7 +81,8 @@ func (c *Client) BlockEvents(ctx context.Context, block *indexer.BlockInfo) ([]i
 			continue
 		}
 		if event != nil {
-			events = append(events, event)
+			i := lg.BlockNumber - first
+			events[i] = append(events[i], event)
 		}
 	}
 	return events, nil

@@ -3,28 +3,22 @@ package cache
 import (
 	"sync"
 	"time"
+
+	"unigo-dex/metrics"
 )
 
-// cache.go — 缓存层（含 Singleflight 请求合并 + 缓存预热）
+// cache.go — 缓存层（带 TTL 和 Singleflight 请求合并）
 //
-// === 缓存雪崩防护 ===
+// === 缓存击穿防护 ===
 //
-// 当 Redis 宕机重启或大量 Key 同时过期，后端请求可能瞬间直击 The Graph 或底层节点。
-// 为此做了两层防护：
+// 热点 Key 过期的瞬间，大量并发请求会同时发现缓存未命中，一起去做同一次昂贵的计算
+// （路由搜索、链上 TWAP 查询）。Singleflight 的做法与 golang.org/x/sync/singleflight 相同：
+// 同一个 Key 同时只允许 1 个请求真正去加载，其余请求等它完成后复用结果。
 //
-//   1. Singleflight（请求合并）
-//      使用类似 golang.org/x/sync/singleflight 的机制：
-//      当多个请求同时查询同一 Key 且缓存失效时，仅允许 1 个请求实际访问后端，
-//      其余请求等待并复用结果。从源头避免缓存击穿。
+// === 存储 ===
 //
-//   2. 缓存预热（Warmup）
-//      系统启动阶段执行预热脚本，优先加载 Top N 交易对的流动性与价格数据，
-//      降低冷启动阶段的突发流量压力。
-//
-// === 本地实现 ===
-//
-// 当前使用内存缓存（sync.Map + TTL），生产环境可替换为 Redis 客户端。
-// 接口保持一致，替换时无需修改业务逻辑。
+// 内存缓存（map + 读写锁 + TTL），条目数有上限，后台协程定期清理过期条目。
+// 命中 / 未命中次数计入 cache_hits_total / cache_misses_total 指标。
 
 // CacheEntry 缓存条目
 type CacheEntry struct {
@@ -32,10 +26,19 @@ type CacheEntry struct {
 	ExpiresAt time.Time
 }
 
-// Cache 内存缓存（带 TTL 和 Singleflight）
+// DefaultMaxEntries 缓存条目数的默认上限
+const DefaultMaxEntries = 10000
+
+// Cache 内存缓存（带 TTL、条目数上限和 Singleflight）
 type Cache struct {
-	data    sync.Map
-	ttl     time.Duration
+	mu   sync.RWMutex
+	data map[string]*CacheEntry
+	ttl  time.Duration
+
+	// 条目数上限：缓存 key 里带着请求参数（如报价金额），不设上限的话，
+	// 一直换参数的请求会让缓存无限增长。超过上限时按写入顺序淘汰最早的条目。
+	maxEntries int
+	order      []string // 各 key 首次写入的顺序，队头最早
 
 	// Singleflight：防止缓存击穿
 	// 同一个 Key 的并发请求只允许一个去加载数据
@@ -50,11 +53,18 @@ type flight struct {
 	err error
 }
 
-// NewCache 创建缓存实例
+// NewCache 创建缓存实例，条目数上限为 DefaultMaxEntries
 func NewCache(ttl time.Duration) *Cache {
+	return NewCacheWithLimit(ttl, DefaultMaxEntries)
+}
+
+// NewCacheWithLimit 创建缓存实例并指定条目数上限
+func NewCacheWithLimit(ttl time.Duration, maxEntries int) *Cache {
 	c := &Cache{
-		ttl:     ttl,
-		flights: make(map[string]*flight),
+		data:       make(map[string]*CacheEntry),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		flights:    make(map[string]*flight),
 	}
 
 	// 启动后台清理过期条目的协程
@@ -65,35 +75,47 @@ func NewCache(ttl time.Duration) *Cache {
 
 // Get 获取缓存值
 func (c *Cache) Get(key string) (interface{}, bool) {
-	value, ok := c.data.Load(key)
-	if !ok {
+	c.mu.RLock()
+	entry, ok := c.data[key]
+	c.mu.RUnlock()
+
+	// 过期的条目当作不存在，由后台清理或被新值覆盖
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		metrics.CacheMissesTotal.Inc()
 		return nil, false
 	}
-
-	entry := value.(*CacheEntry)
-	if time.Now().After(entry.ExpiresAt) {
-		// 已过期，删除
-		c.data.Delete(key)
-		return nil, false
-	}
-
+	metrics.CacheHitsTotal.Inc()
 	return entry.Value, true
 }
 
 // Set 设置缓存值
 func (c *Cache) Set(key string, value interface{}) {
-	c.data.Store(key, &CacheEntry{
-		Value:     value,
-		ExpiresAt: time.Now().Add(c.ttl),
-	})
+	c.SetWithTTL(key, value, c.ttl)
 }
 
 // SetWithTTL 设置缓存值（自定义 TTL）
 func (c *Cache) SetWithTTL(key string, value interface{}, ttl time.Duration) {
-	c.data.Store(key, &CacheEntry{
-		Value:     value,
-		ExpiresAt: time.Now().Add(ttl),
-	})
+	entry := &CacheEntry{Value: value, ExpiresAt: time.Now().Add(ttl)}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.data[key]; !exists {
+		c.order = append(c.order, key)
+	}
+	c.data[key] = entry
+
+	// 超过上限：从最早写入的开始淘汰（队列里已经被删掉的 key 直接跳过）
+	for len(c.data) > c.maxEntries && len(c.order) > 0 {
+		delete(c.data, c.order[0])
+		c.order = c.order[1:]
+	}
+}
+
+// Len 当前缓存的条目数
+func (c *Cache) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.data)
 }
 
 // GetOrLoad 获取缓存值，如果不存在则通过 loader 加载
@@ -105,9 +127,9 @@ func (c *Cache) SetWithTTL(key string, value interface{}, ttl time.Duration) {
 // 有 Singleflight：只有 1 个请求打到 The Graph，其余 99 个等待复用结果
 //
 // 实现原理：
-//   1. 检查是否有正在进行的相同 Key 的加载请求（flight）
-//   2. 如果有，等待其完成并复用结果
-//   3. 如果没有，创建新的 flight，执行 loader，通知所有等待者
+//  1. 检查是否有正在进行的相同 Key 的加载请求（flight）
+//  2. 如果有，等待其完成并复用结果
+//  3. 如果没有，创建新的 flight，执行 loader，通知所有等待者
 func (c *Cache) GetOrLoad(key string, loader func() (interface{}, error)) (interface{}, error) {
 	// 1. 先检查缓存
 	if val, ok := c.Get(key); ok {
@@ -149,7 +171,9 @@ func (c *Cache) GetOrLoad(key string, loader func() (interface{}, error)) (inter
 
 // Delete 删除缓存条目
 func (c *Cache) Delete(key string) {
-	c.data.Delete(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, key)
 }
 
 // cleanup 后台定期清理过期条目
@@ -158,53 +182,21 @@ func (c *Cache) cleanup() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		c.data.Range(func(key, value interface{}) bool {
-			entry := value.(*CacheEntry)
-			if time.Now().After(entry.ExpiresAt) {
-				c.data.Delete(key)
+		now := time.Now()
+		c.mu.Lock()
+		for key, entry := range c.data {
+			if now.After(entry.ExpiresAt) {
+				delete(c.data, key)
 			}
-			return true
-		})
-	}
-}
-
-// WarmupConfig 缓存预热配置
-type WarmupConfig struct {
-	// TopPairs 预热的交易对列表
-	TopPairs []struct {
-		Token0 string
-		Token1 string
-		Fee    uint32
-	}
-}
-
-// Warmup 缓存预热
-//
-// 在系统启动阶段执行：
-//   1. 加载 Top N 交易对的池子状态
-//   2. 预计算常用价格和流动性数据
-//   3. 写入缓存，避免冷启动时的突发请求
-//
-// 预热策略：
-//   - 优先加载交易量最大的交易对（如 ETH/USDC, ETH/USDT）
-//   - 预热数据使用较长的 TTL（5 分钟 vs 正常 30 秒）
-//   - 预热失败不阻塞启动流程
-func (c *Cache) Warmup(config WarmupConfig, loader func(token0, token1 string, fee uint32) (interface{}, error)) int {
-	loaded := 0
-	for _, pair := range config.TopPairs {
-		key := cacheKey(pair.Token0, pair.Token1, pair.Fee)
-		val, err := loader(pair.Token0, pair.Token1, pair.Fee)
-		if err != nil {
-			continue
 		}
-		// 预热数据使用较长 TTL
-		c.SetWithTTL(key, val, c.ttl*10)
-		loaded++
+		// 淘汰队列里只留还在缓存中的 key
+		live := c.order[:0]
+		for _, key := range c.order {
+			if _, ok := c.data[key]; ok {
+				live = append(live, key)
+			}
+		}
+		c.order = live
+		c.mu.Unlock()
 	}
-	return loaded
-}
-
-// cacheKey 生成缓存 Key
-func cacheKey(token0, token1 string, fee uint32) string {
-	return token0 + ":" + token1 + ":" + string(rune(fee))
 }

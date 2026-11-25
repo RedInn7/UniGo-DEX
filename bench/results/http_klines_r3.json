@@ -1,0 +1,22 @@
+{
+  "scenario": "klines",
+  "label": "r3",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 372114,
+  "rps": 18601.658789627953,
+  "p50_ms": 3.205,
+  "p95_ms": 17.938349999999982,
+  "p99_ms": 35.210739999999994,
+  "max_ms": 109.584,
+  "status_200": 372114,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 372114,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 116.3,
+  "load_avg_1m": 35.0
+}

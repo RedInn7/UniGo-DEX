@@ -1,11 +1,13 @@
 package api
 
 import (
-	"log"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"unigo-dex/logging"
+	"unigo-dex/metrics"
 )
 
 // middleware.go — HTTP 中间件（限流 + 背压 + 日志）
@@ -53,7 +55,9 @@ func (cl *ConcurrencyLimiter) Middleware(next http.Handler) http.Handler {
 			// 信号量已满：返回 503 + Retry-After 头
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, `{"error":"服务器繁忙，请稍后重试","code":503}`, http.StatusServiceUnavailable)
-			log.Printf("[Middleware] ⚠️ 并发限制触发，拒绝请求: %s %s", r.Method, r.URL.Path)
+			metrics.HTTPConcurrencyRejected.Inc()
+			// 过载时每秒可能拒绝上万个请求，逐条打日志只会雪上加霜；拒绝数看指标
+			logging.L(r.Context()).Debug("并发上限触发，拒绝请求", "method", r.Method, "path", r.URL.Path)
 		}
 	})
 }
@@ -73,11 +77,13 @@ type RateLimiter struct {
 }
 
 type tokenBucket struct {
-	tokens    int
-	lastTime  time.Time
+	tokens   int
+	lastTime time.Time
 }
 
 // NewRateLimiter 创建限流器
+//
+// maxTokens 是桶容量（允许的突发量），refillRate 是补充 1 个 token 的间隔。
 func NewRateLimiter(maxTokens int, refillRate time.Duration) *RateLimiter {
 	rl := &RateLimiter{
 		buckets:    make(map[string]*tokenBucket),
@@ -111,7 +117,8 @@ func (rl *RateLimiter) Allow(ip string) bool {
 		if bucket.tokens > rl.maxTokens {
 			bucket.tokens = rl.maxTokens
 		}
-		bucket.lastTime = time.Now()
+		// 只推进已经兑换成 token 的那部分时间，不足一个 token 的零头留到下次
+		bucket.lastTime = bucket.lastTime.Add(time.Duration(refilled) * rl.refillRate)
 	}
 
 	if bucket.tokens <= 0 {
@@ -134,7 +141,8 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		if !rl.Allow(ip) {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, `{"error":"请求过于频繁","code":429}`, http.StatusTooManyRequests)
-			log.Printf("[Middleware] ⚠️ 限流触发: IP=%s", ip)
+			metrics.HTTPRateLimited.Inc()
+			logging.L(r.Context()).Debug("限流触发", "ip", ip)
 			return
 		}
 
@@ -159,6 +167,53 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
+// TraceMiddleware 链路追踪中间件
+//
+// 每个请求带一个 Trace ID：客户端通过 X-Trace-Id 传入就沿用（网关、上游服务可以把同一个 ID 串下来），
+// 否则生成一个。ID 放进 context，后面所有用 logging.L(ctx) 打的日志都会带上 trace_id，
+// 同时写回响应头，客户端报障时可以拿它查日志。
+func TraceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if id := r.Header.Get("X-Trace-Id"); validTraceID(id) {
+			ctx = logging.WithExistingTraceID(ctx, id)
+		} else {
+			ctx = logging.WithTraceID(ctx)
+		}
+		w.Header().Set("X-Trace-Id", logging.GetTraceID(ctx))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// validTraceID 只接受 8~64 位的字母、数字、连字符，避免把任意内容写进日志
+func validTraceID(id string) bool {
+	if len(id) < 8 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// MetricsMiddleware 记录请求总数、在途请求数和延迟分布
+//
+// 放在限流和并发控制的外层：被 429 / 503 拒绝的请求也计入总数。
+func MetricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		metrics.HTTPRequestsTotal.Inc()
+		metrics.HTTPActiveConnections.Inc()
+		defer func() {
+			metrics.HTTPActiveConnections.Dec()
+			metrics.HTTPRequestDuration.Observe(float64(time.Since(start).Microseconds()) / 1000)
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 // LoggingMiddleware 请求日志中间件
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,8 +223,9 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
 
-		log.Printf("[API] %s %s -> %d (%v)",
-			r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
+		logging.L(r.Context()).Info("请求完成",
+			"method", r.Method, "path", r.URL.Path, "status", lrw.statusCode,
+			"latency_ms", float64(time.Since(start).Microseconds())/1000)
 	})
 }
 

@@ -1,0 +1,22 @@
+{
+  "scenario": "trades",
+  "label": "r3",
+  "vus": 100,
+  "duration": "20s",
+  "requests": 547161,
+  "rps": 27353.11413055514,
+  "p50_ms": 2.157,
+  "p95_ms": 11.327,
+  "p99_ms": 21.57559999999998,
+  "max_ms": 94.93,
+  "status_200": 547161,
+  "status_429": 0,
+  "status_503": 0,
+  "status_other": 0,
+  "error_rate": 0,
+  "server_requests": 547161,
+  "server_rate_limited": 0,
+  "server_concurrency_rejected": 0,
+  "backend_rss_mb": 44.9,
+  "load_avg_1m": 38.66
+}

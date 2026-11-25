@@ -1,0 +1,4 @@
+{"bench":"sse_latency","clients":50,"deliveries":3000,"e2e_ms_max":198.416,"e2e_ms_p50":78.021,"e2e_ms_p95":188.823,"e2e_ms_p99":198.224,"events":60,"fanout_ms_max":3.887,"fanout_ms_p50":0.192,"fanout_ms_p95":0.496,"missing":0}
+{"bench":"sse_latency","clients":200,"deliveries":12000,"e2e_ms_max":195.031,"e2e_ms_p50":87.541,"e2e_ms_p95":187.554,"e2e_ms_p99":194.809,"events":60,"fanout_ms_max":2.412,"fanout_ms_p50":0.766,"fanout_ms_p95":1.596,"missing":0}
+{"bench":"sse_latency","clients":500,"deliveries":30000,"e2e_ms_max":199.071,"e2e_ms_p50":90.555,"e2e_ms_p95":190.692,"e2e_ms_p99":198.332,"events":60,"fanout_ms_max":4.851,"fanout_ms_p50":1.708,"fanout_ms_p95":3.388,"missing":0}
+{"bench":"sse_burst","clients":200,"clients_disconnected":0,"clients_received_all":200,"deliveries":1200000,"drain_seconds":19.240547208,"expected_deliveries":1200000,"send_seconds":18.019767458,"server_clients_after":200,"server_dropped_clients":5,"stalled_clients":5,"trades_sent":6000}

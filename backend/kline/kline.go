@@ -17,15 +17,21 @@ import (
 //
 //   - 价格：由 swap 后的 sqrtPriceX96 换算，price = (sqrtPriceX96 / 2^96)^2，
 //     即 1 个 token0 最小单位值多少 token1 最小单位（未按 decimals 调整）
-//   - 成交量：amount0 / amount1 的绝对值
+//   - 成交量：amount0 / amount1 的绝对值，用定点整数（最小单位）累加，不丢精度；
+//     JSON 里是十进制字符串，避免超出 JavaScript 的安全整数范围
 //   - 时间：区块时间戳
 //
-// === Reorg 重算 ===
+// === Reorg 回滚 ===
 //
-// 区块时间戳随区块号单调递增，所以回滚区块 >= forkBlock 时：
-//   - 第一笔被回滚成交所在的那一分钟之后的 K 线，里面全是被回滚的成交，直接删除
-//   - 那一分钟本身可能还有未被回滚的成交，用幸存成交重算这根 1m K 线
-//   - 更高周期受影响的那一根，用 1m K 线重新合并
+// 一根 K 线的最高价、最低价不能"减去"一笔成交，所以回滚靠检查点：
+// 每个区块的第一笔成交进来之前，先把当时最新的那根 1m K 线存一份。
+// 回滚区块 >= forkBlock 时，取第一个被回滚区块的检查点：
+//   - 1m：检查点之后的 K 线全部删除，检查点那一根恢复成存下来的样子
+//   - 更高周期：受影响的那一根由 1m K 线重新合并，之后的删除
+//
+// 这样回滚后的 K 线与"从没见过被回滚的成交"完全一致，与保留了多少笔成交无关。
+// 检查点保留最近 maxCheckpoints 个有成交的区块，远大于索引器的回滚窗口；
+// 万一回滚得比这还深，就清空这个池子的 K 线，用保留的成交重建。
 //
 // === 内存上限 ===
 //
@@ -61,11 +67,42 @@ type Candle struct {
 	High     float64 `json:"high"`
 	Low      float64 `json:"low"`
 	Close    float64 `json:"close"`
-	// 已知上限：成交量用 float64 累加，画图精度足够；需要精确到 wei 时改成 big.Int
-	Volume0 float64 `json:"volume0"` // token0 成交量（最小单位）
-	Volume1 float64 `json:"volume1"` // token1 成交量（最小单位）
-	Trades  int     `json:"trades"`  // 成交笔数
+	Volume0  string  `json:"volume0"` // token0 成交量（最小单位，十进制字符串）
+	Volume1  string  `json:"volume1"` // token1 成交量（最小单位，十进制字符串）
+	Trades   int     `json:"trades"`  // 成交笔数
 }
+
+// candle K 线的内部表示：成交量是定点整数
+type candle struct {
+	openTime               int64
+	open, high, low, close float64
+	volume0, volume1       *big.Int
+	trades                 int
+}
+
+func (c candle) export() Candle {
+	return Candle{
+		OpenTime: c.openTime, Open: c.open, High: c.high, Low: c.low, Close: c.close,
+		Volume0: c.volume0.String(), Volume1: c.volume1.String(), Trades: c.trades,
+	}
+}
+
+// clone 深拷贝：成交量在合并时原地累加，存档和新建 K 线都要用自己的一份
+func (c candle) clone() candle {
+	c.volume0 = new(big.Int).Set(c.volume0)
+	c.volume1 = new(big.Int).Set(c.volume1)
+	return c
+}
+
+// checkpoint 某个区块的第一笔成交进来之前，池子最新一根 1m K 线的存档
+type checkpoint struct {
+	block uint64
+	had   bool   // 当时是否已有 K 线
+	last  candle // 当时最新的 1m K 线
+}
+
+// 每个池子保留的检查点数（有成交的区块数）
+const maxCheckpoints = 256
 
 // Trade 一笔成交
 type Trade struct {
@@ -84,7 +121,13 @@ type Trade struct {
 
 type poolData struct {
 	trades  []Trade    // 按时间升序
-	candles [][]Candle // 下标与 intervals 对应，按 OpenTime 升序
+	candles [][]candle // 下标与 intervals 对应，按 openTime 升序
+
+	checkpoints []checkpoint // 按区块号升序
+	// 区块号大于 checkpointFloor 的有成交区块都有检查点（更早的已被淘汰）
+	checkpointFloor uint64
+	lastBlock       uint64 // 最近一笔成交所在的区块
+	hasTrades       bool
 }
 
 // Aggregator K 线聚合器，实现 indexer.SwapListener
@@ -142,7 +185,7 @@ func (a *Aggregator) record(e *indexer.SwapEvent, trade Trade) (Candle, bool) {
 		if len(a.pools) >= a.cfg.MaxPools {
 			return Candle{}, false
 		}
-		p = &poolData{candles: make([][]Candle, len(intervals))}
+		p = &poolData{candles: make([][]candle, len(intervals))}
 		a.pools[e.PoolAddress] = p
 	}
 	// 区块时间戳单调递增；时间倒退的成交不可能来自一条合法的链，丢弃
@@ -150,19 +193,44 @@ func (a *Aggregator) record(e *indexer.SwapEvent, trade Trade) (Candle, bool) {
 		return Candle{}, false
 	}
 
+	a.apply(p, trade, new(big.Int).Abs(e.Amount0), new(big.Int).Abs(e.Amount1))
+	oneMin := p.candles[0]
+	return oneMin[len(oneMin)-1].export(), true
+}
+
+// apply 把一笔成交记入池子：必要时存检查点，追加成交记录，更新六个周期的 K 线
+func (a *Aggregator) apply(p *poolData, trade Trade, volume0, volume1 *big.Int) {
+	// 新区块的第一笔成交：先把当前最新的 1m K 线存档
+	if !p.hasTrades || trade.BlockNumber != p.lastBlock {
+		cp := checkpoint{block: trade.BlockNumber}
+		if oneMin := p.candles[0]; len(oneMin) > 0 {
+			cp.had, cp.last = true, oneMin[len(oneMin)-1].clone()
+		}
+		p.checkpoints = append(p.checkpoints, cp)
+		if len(p.checkpoints) > maxCheckpoints {
+			p.checkpointFloor = p.checkpoints[0].block
+			p.checkpoints = p.checkpoints[1:]
+		}
+		p.lastBlock, p.hasTrades = trade.BlockNumber, true
+	}
+
 	p.trades = append(p.trades, trade)
 	if len(p.trades) > a.cfg.MaxTrades {
 		p.trades = p.trades[len(p.trades)-a.cfg.MaxTrades:]
 	}
 
-	c := tradeCandle(trade, absFloat(e.Amount0), absFloat(e.Amount1))
+	c := candle{
+		openTime: trade.Timestamp,
+		open:     trade.Price, high: trade.Price, low: trade.Price, close: trade.Price,
+		volume0: volume0, volume1: volume1,
+		trades: 1,
+	}
 	for i, iv := range intervals {
 		p.candles[i] = a.merge(p.candles[i], iv.secs, c)
 	}
-	return p.candles[0][len(p.candles[0])-1], true
 }
 
-// OnReorg 丢弃区块号 >= forkBlock 的成交，并重算受影响的 K 线
+// OnReorg 丢弃区块号 >= forkBlock 的成交，并把受影响的 K 线恢复到这些成交发生之前的样子
 func (a *Aggregator) OnReorg(forkBlock uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -172,54 +240,78 @@ func (a *Aggregator) OnReorg(forkBlock uint64) {
 }
 
 func (a *Aggregator) rollback(p *poolData, forkBlock uint64) {
-	first := sort.Search(len(p.trades), func(i int) bool { return p.trades[i].BlockNumber >= forkBlock })
-	if first == len(p.trades) {
+	if !p.hasTrades || p.lastBlock < forkBlock {
+		return // 这个池子在被回滚的区块里没有成交
+	}
+	firstTrade := sort.Search(len(p.trades), func(i int) bool { return p.trades[i].BlockNumber >= forkBlock })
+	survivors := p.trades[:firstTrade]
+
+	if forkBlock <= p.checkpointFloor {
+		// 回滚得比检查点保留的范围还深：清空，用保留的成交重建
+		*p = poolData{candles: make([][]candle, len(intervals))}
+		for _, t := range survivors {
+			amount0, _ := new(big.Int).SetString(t.Amount0, 10)
+			amount1, _ := new(big.Int).SetString(t.Amount1, 10)
+			a.apply(p, t, amount0.Abs(amount0), amount1.Abs(amount1))
+		}
 		return
 	}
-	// 第一笔被回滚成交所在的分钟：此后的 K 线全部作废
-	minute := bucket(p.trades[first].Timestamp, 60)
-	p.trades = p.trades[:first]
 
-	for i, iv := range intervals {
-		start := bucket(minute, iv.secs)
-		series := p.candles[i]
-		p.candles[i] = series[:sort.Search(len(series), func(j int) bool { return series[j].OpenTime >= start })]
+	// 第一个被回滚区块的检查点：那个区块的成交进来之前的状态
+	i := sort.Search(len(p.checkpoints), func(i int) bool { return p.checkpoints[i].block >= forkBlock })
+	cp := p.checkpoints[i]
+	p.checkpoints = p.checkpoints[:i]
+	p.trades = survivors
+	// 最近一笔仍然有效的成交所在的区块：上一个检查点的区块；检查点都没了就是保留范围的下界
+	if i > 0 {
+		p.lastBlock = p.checkpoints[i-1].block
+	} else {
+		p.lastBlock, p.hasTrades = p.checkpointFloor, p.checkpointFloor > 0
 	}
 
-	// 1m：用这一分钟内幸存的成交重算
-	// 已知上限：这一分钟开始以来的成交若超过 MaxTrades，早期成交已被淘汰，重算出的这根 1m 会缺数据；
-	// 需要时把成交的保留策略改成"回滚窗口内不淘汰"
-	from := sort.Search(len(p.trades), func(i int) bool { return p.trades[i].Timestamp >= minute })
-	for _, t := range p.trades[from:] {
-		amount0, _ := new(big.Int).SetString(t.Amount0, 10)
-		amount1, _ := new(big.Int).SetString(t.Amount1, 10)
-		p.candles[0] = a.merge(p.candles[0], 60, tradeCandle(t, absFloat(amount0), absFloat(amount1)))
-	}
-
-	// 更高周期：受影响的那一根由 1m K 线重新合并
+	// 1m：检查点之后的 K 线删除，检查点那一根恢复原样
 	oneMin := p.candles[0]
-	for i := 1; i < len(intervals); i++ {
-		start := bucket(minute, intervals[i].secs)
-		from := sort.Search(len(oneMin), func(j int) bool { return oneMin[j].OpenTime >= start })
-		for _, c := range oneMin[from:] {
-			p.candles[i] = a.merge(p.candles[i], intervals[i].secs, c)
+	if cp.had {
+		keep := sort.Search(len(oneMin), func(j int) bool { return oneMin[j].openTime >= cp.last.openTime })
+		oneMin = append(oneMin[:keep], cp.last)
+	} else {
+		oneMin = oneMin[:0]
+	}
+	p.candles[0] = oneMin
+
+	// 更高周期：包含检查点那一分钟的那一根由 1m K 线重新合并，之后的删除
+	for k := 1; k < len(intervals); k++ {
+		secs := intervals[k].secs
+		if !cp.had {
+			p.candles[k] = p.candles[k][:0]
+			continue
 		}
+		start := bucket(cp.last.openTime, secs)
+		series := p.candles[k]
+		series = series[:sort.Search(len(series), func(j int) bool { return series[j].openTime >= start })]
+		from := sort.Search(len(oneMin), func(j int) bool { return oneMin[j].openTime >= start })
+		for _, c := range oneMin[from:] {
+			series = a.merge(series, secs, c)
+		}
+		p.candles[k] = series
 	}
 }
 
 // merge 把 c（一笔成交或一根更小周期的 K 线）并入 series 的最后一根，或追加新的一根
-func (a *Aggregator) merge(series []Candle, secs int64, c Candle) []Candle {
-	c.OpenTime = bucket(c.OpenTime, secs)
-	if n := len(series); n > 0 && series[n-1].OpenTime == c.OpenTime {
+func (a *Aggregator) merge(series []candle, secs int64, c candle) []candle {
+	openTime := bucket(c.openTime, secs)
+	if n := len(series); n > 0 && series[n-1].openTime == openTime {
 		last := &series[n-1]
-		last.High = max(last.High, c.High)
-		last.Low = min(last.Low, c.Low)
-		last.Close = c.Close
-		last.Volume0 += c.Volume0
-		last.Volume1 += c.Volume1
-		last.Trades += c.Trades
+		last.high = max(last.high, c.high)
+		last.low = min(last.low, c.low)
+		last.close = c.close
+		last.volume0.Add(last.volume0, c.volume0)
+		last.volume1.Add(last.volume1, c.volume1)
+		last.trades += c.trades
 		return series
 	}
+	c = c.clone()
+	c.openTime = openTime
 	series = append(series, c)
 	if len(series) > a.cfg.MaxCandles {
 		series = series[len(series)-a.cfg.MaxCandles:]
@@ -245,7 +337,15 @@ func (a *Aggregator) Klines(pool, interval string, limit int) ([]Candle, error) 
 	if !ok {
 		return []Candle{}, nil
 	}
-	return tail(p.candles[idx], limit), nil
+	series := p.candles[idx]
+	if limit <= 0 || limit > len(series) {
+		limit = len(series)
+	}
+	out := make([]Candle, 0, limit)
+	for _, c := range series[len(series)-limit:] {
+		out = append(out, c.export())
+	}
+	return out, nil
 }
 
 // Trades 返回指定池子最近的 limit 笔成交，最新的在前
@@ -273,18 +373,4 @@ func tail[T any](s []T, limit int) []T {
 
 func bucket(ts, secs int64) int64 {
 	return ts - ts%secs
-}
-
-func tradeCandle(t Trade, volume0, volume1 float64) Candle {
-	return Candle{
-		OpenTime: t.Timestamp,
-		Open:     t.Price, High: t.Price, Low: t.Price, Close: t.Price,
-		Volume0: volume0, Volume1: volume1,
-		Trades: 1,
-	}
-}
-
-func absFloat(v *big.Int) float64 {
-	f, _ := new(big.Float).SetInt(new(big.Int).Abs(v)).Float64()
-	return f
 }
