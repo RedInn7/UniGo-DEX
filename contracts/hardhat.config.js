@@ -1,5 +1,10 @@
 require("@nomicfoundation/hardhat-toolbox");
 
+// GAS_PRICE（单位 wei）非空时固定 gas 价，测试币不多时用来压低花费
+const gasPrice = process.env.GAS_PRICE ? Number(process.env.GAS_PRICE) : "auto";
+// 测试网部署账户私钥，只从环境变量读，不写进仓库
+const accounts = process.env.DEPLOYER_KEY ? [process.env.DEPLOYER_KEY] : [];
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
@@ -20,6 +25,18 @@ module.exports = {
     hardhat: {
       // 本地 Hardhat 网络配置
       allowUnlimitedContractSize: true,
+      // FORK_URL 非空时分叉对应网络，用来在上链前演练部署
+      forking: process.env.FORK_URL ? { url: process.env.FORK_URL } : undefined,
+    },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
+      accounts,
+      gasPrice,
+    },
+    baseSepolia: {
+      url: process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
+      accounts,
+      gasPrice,
     },
     localhost: {
       // 默认连本机 8545；端口被占用时可以用 RPC_URL 指向别的本地节点

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -58,6 +59,11 @@ type Client struct {
 	eth     Backend
 	cb      *circuitbreaker.CircuitBreaker
 	factory common.Address
+	// raw 非空时区块哈希直接用节点返回的，见 BlockByNumber
+	raw *rpc.Client
+	// pools 已发现的池子地址，拉日志时用作地址过滤，见 BlockEvents
+	poolsMu sync.Mutex
+	pools   []common.Address
 }
 
 // NewClient 用已有的节点连接创建客户端
@@ -82,18 +88,21 @@ func Dial(ctx context.Context, rpcURL, factory string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	head, err := eth.HeaderByNumber(ctx, nil)
-	if err != nil {
+	if _, err := eth.BlockNumber(ctx); err != nil {
 		eth.Close()
 		return nil, err
 	}
-	// 区块哈希由本地按区块头字段复算。个别节点返回的区块头字段不全时复算结果
-	// 会和节点自己的哈希对不上，父哈希校验会一直误报 Reorg，所以启动时先确认一次。
-	if _, err := eth.HeaderByHash(ctx, head.Hash()); err != nil {
-		eth.Close()
-		return nil, fmt.Errorf("节点区块头与本地复算的哈希不一致: %w", err)
-	}
-	return NewClient(eth, common.HexToAddress(factory)), nil
+	client := NewClient(eth, common.HexToAddress(factory))
+	client.raw = eth.Client()
+	return client, nil
+}
+
+// rawHeader 区块头里链路校验要用的字段
+type rawHeader struct {
+	Number     hexutil.Uint64 `json:"number"`
+	Hash       common.Hash    `json:"hash"`
+	ParentHash common.Hash    `json:"parentHash"`
+	Time       hexutil.Uint64 `json:"timestamp"`
 }
 
 // call 通过断路器执行一次 RPC 调用
@@ -128,7 +137,31 @@ func (c *Client) LatestBlock(ctx context.Context) (uint64, error) {
 }
 
 // BlockByNumber 按高度取区块头
+//
+// 连真实节点时哈希取节点返回的 hash 字段，不在本地复算：types.Header.Hash() 按
+// 本地 go-ethereum 认识的字段做 RLP，网络硬分叉给区块头加了新字段（Sepolia 上已有
+// blockAccessListHash、slotNumber）之后，复算结果就和链上哈希对不上，父哈希校验会
+// 一直误报 Reorg。
 func (c *Client) BlockByNumber(ctx context.Context, number uint64) (*indexer.BlockInfo, error) {
+	if c.raw != nil {
+		head, err := call(c, func() (*rawHeader, error) {
+			var h *rawHeader
+			err := c.raw.CallContext(ctx, &h, "eth_getBlockByNumber", hexutil.EncodeUint64(number), false)
+			if err == nil && h == nil {
+				err = ErrNotFound
+			}
+			return h, err
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &indexer.BlockInfo{
+			Number:     uint64(head.Number),
+			Hash:       head.Hash.Hex(),
+			ParentHash: head.ParentHash.Hex(),
+			Timestamp:  time.Unix(int64(head.Time), 0),
+		}, nil
+	}
 	header, err := call(c, func() (*types.Header, error) {
 		return c.eth.HeaderByNumber(ctx, new(big.Int).SetUint64(number))
 	})
