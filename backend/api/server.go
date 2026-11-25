@@ -3,14 +3,22 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"unigo-dex/cache"
+	"unigo-dex/chain"
+	"unigo-dex/gas"
 	"unigo-dex/indexer"
+	"unigo-dex/kline"
+	"unigo-dex/metrics"
+	"unigo-dex/mev"
 	"unigo-dex/oracle"
 	"unigo-dex/router"
 )
@@ -23,6 +31,11 @@ import (
 //   GET  /api/v1/pools         — 获取所有池子信息
 //   GET  /api/v1/pool/:address — 获取单个池子详情
 //   GET  /api/v1/status        — 系统状态（索引器、路由器、保护模式）
+//   GET  /api/v1/tx/{hash}     — 交易状态（pending / pending_confirmation / confirmed / reverted）
+//   GET  /api/v1/klines        — K 线（pool, interval, limit）
+//   GET  /api/v1/trades        — 最近成交（pool, limit）
+//   GET  /api/v1/mev/alerts    — 三明治攻击告警
+//   GET  /metrics              — Prometheus 指标
 //
 // 架构特点：
 //   - 标准库 net/http（无外部依赖）
@@ -32,11 +45,11 @@ import (
 
 // ServerConfig API 服务器配置
 type ServerConfig struct {
-	Port              int
-	MaxConcurrent     int           // 最大并发请求数
-	RateLimitPerIP    int           // 每 IP 每秒请求限制
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
+	Port           int
+	MaxConcurrent  int // 最大并发请求数
+	RateLimitPerIP int // 每 IP 每秒请求限制
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
 }
 
 // DefaultServerConfig 返回默认配置
@@ -58,6 +71,10 @@ type Server struct {
 	idxer      *indexer.Indexer
 	cache      *cache.Cache
 	oracle     *oracle.Oracle
+	chain      *chain.Client // 未连接节点时为 nil
+	gas        *gas.Estimator
+	klines     *kline.Aggregator
+	guard      *mev.Guard
 	httpServer *http.Server
 }
 
@@ -69,6 +86,10 @@ func NewServer(
 	idx *indexer.Indexer,
 	c *cache.Cache,
 	o *oracle.Oracle,
+	chainClient *chain.Client,
+	gasEstimator *gas.Estimator,
+	klines *kline.Aggregator,
+	guard *mev.Guard,
 ) *Server {
 	return &Server{
 		config: config,
@@ -77,11 +98,15 @@ func NewServer(
 		idxer:  idx,
 		cache:  c,
 		oracle: o,
+		chain:  chainClient,
+		gas:    gasEstimator,
+		klines: klines,
+		guard:  guard,
 	}
 }
 
-// Start 启动 HTTP 服务器
-func (s *Server) Start() error {
+// Handler 构建路由和中间件链
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// 注册路由
@@ -89,23 +114,31 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/v1/swap", s.handleSwap)
 	mux.HandleFunc("/api/v1/pools", s.handlePools)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
+	mux.HandleFunc("GET /api/v1/tx/{hash}", s.handleTx)
+	mux.HandleFunc("GET /api/v1/klines", s.handleKlines)
+	mux.HandleFunc("GET /api/v1/trades", s.handleTrades)
+	mux.HandleFunc("GET /api/v1/mev/alerts", s.handleMEVAlerts)
+	mux.Handle("GET /metrics", metrics.DefaultRegistry.Handler())
 	mux.HandleFunc("/health", s.handleHealth)
 
 	// 构建中间件链
 	concLimiter := NewConcurrencyLimiter(s.config.MaxConcurrent)
 	rateLimiter := NewRateLimiter(s.config.RateLimitPerIP, time.Second)
 
-	handler := CORSMiddleware(
+	return CORSMiddleware(
 		LoggingMiddleware(
 			rateLimiter.Middleware(
 				concLimiter.Middleware(mux),
 			),
 		),
 	)
+}
 
+// Start 启动 HTTP 服务器
+func (s *Server) Start() error {
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.config.Port),
-		Handler:      handler,
+		Handler:      s.Handler(),
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 	}
@@ -124,20 +157,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // handleQuote 报价接口
 //
 // 流程：
-//   1. 解析请求参数
-//   2. 检查缓存（Singleflight 防击穿）
-//   3. 调用路由引擎查找最优路径
-//   4. 预言机验证价格安全性
-//   5. 返回报价结果
+//  1. 解析请求参数
+//  2. 检查缓存（Singleflight 防击穿）
+//  3. 调用路由引擎查找最优路径
+//  4. 预言机验证价格安全性
+//  5. MEV 保护：价格冲击、推荐滑点与 min_amount_out
+//  6. Gas 成本评估
+//  7. 返回报价结果
 func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "only GET allowed")
 		return
 	}
 
-	tokenIn := r.URL.Query().Get("token_in")
-	tokenOut := r.URL.Query().Get("token_out")
-	amountInStr := r.URL.Query().Get("amount_in")
+	q := r.URL.Query()
+	tokenIn := strings.ToLower(q.Get("token_in"))
+	tokenOut := strings.ToLower(q.Get("token_out"))
+	amountInStr := q.Get("amount_in")
 
 	if tokenIn == "" || tokenOut == "" || amountInStr == "" {
 		writeError(w, http.StatusBadRequest, "missing required params: token_in, token_out, amount_in")
@@ -145,53 +181,73 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	amountIn, ok := new(big.Int).SetString(amountInStr, 10)
-	if !ok {
+	if !ok || amountIn.Sign() <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid amount_in")
 		return
 	}
 
-	// 尝试从缓存获取（Singleflight 防击穿）
-	cacheKey := fmt.Sprintf("quote:%s:%s:%s", tokenIn, tokenOut, amountInStr)
-	result, err := s.cache.GetOrLoad(cacheKey, func() (interface{}, error) {
-		// 缓存未命中，执行路由搜索
-		route, err := s.router.FindBestRoute(r.Context(), tokenIn, tokenOut, amountIn)
-		if err != nil {
-			return nil, err
+	// slippage 可选，缺省时用默认滑点
+	var slippage float64
+	if v := q.Get("slippage"); v != "" {
+		var err error
+		if slippage, err = strconv.ParseFloat(v, 64); err != nil || slippage < 0 {
+			writeError(w, http.StatusBadRequest, "invalid slippage")
+			return
 		}
-		return route, nil
-	})
+	}
 
+	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "route search failed: "+err.Error())
 		return
 	}
 
-	route := result.(*router.Route)
-
 	// 预言机验证
 	pair := tokenIn + "/" + tokenOut
 	_, _, warning := s.oracle.ValidateSwap(pair, 0.005)
 
+	// MEV 保护
+	slippage, mevWarning := s.guard.RecommendSlippage(poolAddresses(route), slippage, time.Now())
+
 	resp := QuoteResponse{
 		AmountOut:    route.AmountOut.String(),
+		MinAmountOut: mev.MinAmountOut(route.AmountOut, slippage).String(),
+		Slippage:     slippage,
 		Path:         route.Path,
+		PriceImpact:  mev.PriceImpact(route.Pools, tokenIn, amountIn, route.AmountOut),
 		GasEstimate:  route.GasEstimate,
+		Gas:          s.gas.Estimate(r.Context(), route.GasEstimate),
 		TicksCrossed: route.TicksCrossed,
 		IsDegraded:   route.IsDegraded,
-		Warning:      warning,
+		Warning:      joinWarnings(warning, mevWarning),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// findRoute 查找路由，结果经缓存（Singleflight 防击穿）
+func (s *Server) findRoute(ctx context.Context, tokenIn, tokenOut string, amountIn *big.Int) (*router.Route, error) {
+	cacheKey := fmt.Sprintf("quote:%s:%s:%s", tokenIn, tokenOut, amountIn.String())
+	result, err := s.cache.GetOrLoad(cacheKey, func() (interface{}, error) {
+		// 缓存未命中，执行路由搜索
+		return s.router.FindBestRoute(ctx, tokenIn, tokenOut, amountIn)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*router.Route), nil
+}
+
 // handleSwap 提交交易接口
 //
 // 流程：
-//   1. 解析请求（含 EIP-712 签名）
-//   2. 预言机校验价格安全性
-//   3. 验证 EIP-712 签名（含 nonce + deadline 防重放）
-//   4. 提交交易到链上
-//   5. 返回交易哈希（状态为 pending_confirmation）
+//  1. 解析请求
+//  2. 预言机校验价格安全性
+//  3. MEV 交易前保护：价格冲击过大、deadline 已过期或过长时拒绝
+//  4. 请求带有已签名交易（raw_tx）时广播到链上，返回真实交易哈希；
+//     否则只返回检查结果，由客户端自行提交
+//
+// 后端不托管私钥，不会替用户签名。
 func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "only POST allowed")
@@ -199,28 +255,136 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SwapRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	tokenIn, tokenOut := strings.ToLower(req.TokenIn), strings.ToLower(req.TokenOut)
+	amountIn, ok := new(big.Int).SetString(req.AmountIn, 10)
+	if !ok || amountIn.Sign() <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid amount_in")
 		return
 	}
 
 	// 预言机验证
-	pair := req.TokenIn + "/" + req.TokenOut
+	pair := tokenIn + "/" + tokenOut
 	allowed, _, warning := s.oracle.ValidateSwap(pair, req.Slippage)
 	if !allowed {
 		writeError(w, http.StatusForbidden, warning)
 		return
 	}
 
-	// 返回乐观更新（Optimistic UI）
-	// 交易哈希在实际提交到链上后更新
+	// MEV 交易前保护：没有报价就无法评估价格冲击，不放行
+	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "route search failed: "+err.Error())
+		return
+	}
+	now := time.Now()
+	impact := mev.PriceImpact(route.Pools, tokenIn, amountIn, route.AmountOut)
+	if err := s.guard.CheckSwap(impact, req.Deadline, now); err != nil {
+		writeError(w, http.StatusBadRequest, "swap rejected: "+err.Error())
+		return
+	}
+	slippage, mevWarning := s.guard.RecommendSlippage(poolAddresses(route), req.Slippage, now)
+
 	resp := SwapResponse{
-		TxHash:  "0x0000000000000000000000000000000000000000000000000000000000000000",
-		Status:  "pending_confirmation",
-		Warning: warning,
+		Status:       "validated",
+		PriceImpact:  impact,
+		MinAmountOut: mev.MinAmountOut(route.AmountOut, slippage).String(),
+		Warning:      joinWarnings(warning, mevWarning),
+	}
+
+	if req.RawTx != "" {
+		if s.chain == nil {
+			writeError(w, http.StatusServiceUnavailable, "chain node not configured, cannot broadcast raw_tx")
+			return
+		}
+		txHash, err := s.chain.SendRawTransaction(r.Context(), req.RawTx)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "broadcast failed: "+err.Error())
+			return
+		}
+		resp.TxHash = txHash
+		resp.Status = chain.TxPending
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTx 交易状态查询
+//
+// 按回执和确认数返回 pending / pending_confirmation / confirmed / reverted，
+// 确认数阈值与索引器的延迟确认配置一致。
+func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
+	if s.chain == nil {
+		writeError(w, http.StatusServiceUnavailable, "chain node not configured")
+		return
+	}
+
+	status, err := s.chain.TxStatus(r.Context(), r.PathValue("hash"), s.idxer.ConfirmationBlocks())
+	switch {
+	case errors.Is(err, chain.ErrInvalidHash):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, chain.ErrNotFound):
+		writeError(w, http.StatusNotFound, "transaction not found")
+	case err != nil:
+		writeError(w, http.StatusBadGateway, "chain query failed: "+err.Error())
+	default:
+		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+// handleKlines K 线查询：pool 必填，interval 默认 1m，limit 默认 100（最大 1000）
+func (s *Server) handleKlines(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	pool := strings.ToLower(q.Get("pool"))
+	if pool == "" {
+		writeError(w, http.StatusBadRequest, "missing required param: pool")
+		return
+	}
+	interval := q.Get("interval")
+	if interval == "" {
+		interval = "1m"
+	}
+	limit, ok := parseLimit(q.Get("limit"), 100)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+
+	candles, err := s.klines.Klines(pool, interval, limit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, candles)
+}
+
+// handleTrades 最近成交查询：pool 必填，limit 默认 50（最大 1000）
+func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	pool := strings.ToLower(q.Get("pool"))
+	if pool == "" {
+		writeError(w, http.StatusBadRequest, "missing required param: pool")
+		return
+	}
+	limit, ok := parseLimit(q.Get("limit"), 50)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.klines.Trades(pool, limit))
+}
+
+// handleMEVAlerts 三明治攻击告警：limit 默认 100（最大 1000），最新的在前
+func (s *Server) handleMEVAlerts(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(r.URL.Query().Get("limit"), 100)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.guard.Alerts(limit))
 }
 
 // handlePools 获取所有池子信息
@@ -277,6 +441,38 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // ===== 辅助函数 =====
+
+// parseLimit 解析 limit 参数：缺省用 def，范围 1~1000
+func parseLimit(v string, def int) (int, bool) {
+	if v == "" {
+		return def, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return min(n, 1000), true
+}
+
+// poolAddresses 路由经过的池子地址
+func poolAddresses(route *router.Route) []string {
+	addrs := make([]string, len(route.Pools))
+	for i, p := range route.Pools {
+		addrs[i] = p.Address
+	}
+	return addrs
+}
+
+// joinWarnings 合并多条警告
+func joinWarnings(warnings ...string) string {
+	var parts []string
+	for _, w := range warnings {
+		if w != "" {
+			parts = append(parts, w)
+		}
+	}
+	return strings.Join(parts, " ")
+}
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")

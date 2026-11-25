@@ -11,7 +11,11 @@ import (
 
 	"unigo-dex/api"
 	"unigo-dex/cache"
+	"unigo-dex/chain"
+	"unigo-dex/gas"
 	"unigo-dex/indexer"
+	"unigo-dex/kline"
+	"unigo-dex/mev"
 	"unigo-dex/oracle"
 	"unigo-dex/router"
 )
@@ -23,7 +27,8 @@ import (
 //   ┌──────────┐    ┌──────────┐    ┌───────────┐
 //   │ Ethereum │───>│ Indexer  │───>│ PoolState │
 //   │  Node    │    │(事件索引) │    │ (状态管理) │
-//   └──────────┘    └──────────┘    └─────┬─────┘
+//   └──────────┘    └────┬─────┘    └─────┬─────┘
+//    (chain 包)          └──> K 线聚合 / 三明治检测（订阅 Swap 事件）
 //                                         │
 //   ┌──────────┐    ┌──────────┐    ┌─────▼─────┐
 //   │ Chainlink│───>│ Oracle   │───>│  Router   │
@@ -58,8 +63,44 @@ func main() {
 	// === 2. 初始化并启动 Indexer ===
 	log.Println("[启动] 初始化事件索引器...")
 	idxConfig := indexer.DefaultConfig()
-	idxConfig.RPCURL = getEnv("RPC_URL", "http://127.0.0.1:8545")
-	idx := indexer.NewIndexer(idxConfig, stateManager, nil)
+	idxConfig.RPCURL = os.Getenv("RPC_URL")
+	idxConfig.FactoryAddress = os.Getenv("FACTORY_ADDRESS")
+	idxConfig.StartBlock = uint64(getEnvInt("START_BLOCK", 0))
+	idxConfig.ConfirmationBlocks = uint64(getEnvInt("CONFIRMATION_BLOCKS", int(idxConfig.ConfirmationBlocks)))
+
+	// 配置了 RPC_URL 且节点连得上就用真实链，否则用模拟源，保证不配节点也能启动
+	var (
+		chainClient *chain.Client
+		chainSource indexer.ChainSource // nil = 模拟源
+		feeSource   gas.FeeSource       // nil = 静态 Gas 估算
+	)
+	if idxConfig.RPCURL != "" {
+		dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
+		client, err := chain.Dial(dialCtx, idxConfig.RPCURL, idxConfig.FactoryAddress)
+		dialCancel()
+		switch {
+		case err != nil:
+			log.Printf("[启动] ⚠️ 连接节点 %s 失败（%v），索引器使用模拟源", idxConfig.RPCURL, err)
+		case idxConfig.FactoryAddress == "":
+			chainClient, feeSource = client, client
+			log.Printf("[启动] ⚠️ 已连接节点，但未配置 FACTORY_ADDRESS，无法发现池子，索引器使用模拟源")
+		default:
+			chainClient, feeSource, chainSource = client, client, client
+			log.Printf("[启动] 已连接节点 %s，Factory=%s，从区块 %d 开始索引",
+				idxConfig.RPCURL, idxConfig.FactoryAddress, idxConfig.StartBlock)
+		}
+	} else {
+		log.Println("[启动] 未配置 RPC_URL，索引器使用模拟源")
+	}
+
+	idx := indexer.NewIndexer(idxConfig, stateManager, chainSource)
+
+	// K 线聚合与 MEV 检测订阅索引器的 Swap 事件流
+	klines := kline.NewAggregator(kline.DefaultConfig())
+	guard := mev.NewGuard(mev.DefaultConfig())
+	idx.Subscribe(klines)
+	idx.Subscribe(guard)
+
 	if err := idx.Start(ctx); err != nil {
 		log.Fatalf("索引器启动失败: %v", err)
 	}
@@ -90,7 +131,9 @@ func main() {
 	log.Println("[启动] 初始化 API 服务器...")
 	serverConfig := api.DefaultServerConfig()
 	serverConfig.Port = getEnvInt("PORT", 8080)
-	server := api.NewServer(serverConfig, routerInst, stateManager, idx, appCache, oracleInst)
+	gasEstimator := gas.NewEstimator(gas.DefaultConfig(), feeSource)
+	server := api.NewServer(serverConfig, routerInst, stateManager, idx, appCache, oracleInst,
+		chainClient, gasEstimator, klines, guard)
 
 	// 在独立协程中启动 HTTP 服务器
 	go func() {
@@ -107,6 +150,11 @@ func main() {
 	fmt.Println("    POST /api/v1/swap    — 提交交易")
 	fmt.Println("    GET  /api/v1/pools   — 池子列表")
 	fmt.Println("    GET  /api/v1/status  — 系统状态")
+	fmt.Println("    GET  /api/v1/tx/{hash}   — 交易状态")
+	fmt.Println("    GET  /api/v1/klines      — K 线")
+	fmt.Println("    GET  /api/v1/trades      — 最近成交")
+	fmt.Println("    GET  /api/v1/mev/alerts  — 三明治攻击告警")
+	fmt.Println("    GET  /metrics            — 监控指标")
 	fmt.Println("    GET  /health         — 健康检查")
 	fmt.Println("========================================")
 

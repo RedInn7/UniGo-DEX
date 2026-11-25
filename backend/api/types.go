@@ -1,5 +1,7 @@
 package api
 
+import "unigo-dex/gas"
+
 // types.go — API 请求/响应类型定义
 
 // QuoteRequest 报价请求
@@ -11,31 +13,37 @@ type QuoteRequest struct {
 
 // QuoteResponse 报价响应
 type QuoteResponse struct {
-	AmountOut    string   `json:"amount_out"`
-	Path         []string `json:"path"`
-	PriceImpact  float64  `json:"price_impact"`
-	GasEstimate  uint64   `json:"gas_estimate"`
-	TicksCrossed int      `json:"ticks_crossed"`
-	IsDegraded   bool     `json:"is_degraded"` // 是否为降级路由
-	Warning      string   `json:"warning,omitempty"`
+	AmountOut    string       `json:"amount_out"`
+	MinAmountOut string       `json:"min_amount_out"` // 按推荐滑点算出的最少应得数量
+	Slippage     float64      `json:"slippage"`       // 推荐滑点（池子近期被夹过时会收紧）
+	Path         []string     `json:"path"`
+	PriceImpact  float64      `json:"price_impact"` // 价格冲击，0.01 = 1%
+	GasEstimate  uint64       `json:"gas_estimate"`
+	Gas          gas.Estimate `json:"gas"` // EIP-1559 口径的 Gas 成本评估
+	TicksCrossed int          `json:"ticks_crossed"`
+	IsDegraded   bool         `json:"is_degraded"` // 是否为降级路由
+	Warning      string       `json:"warning,omitempty"`
 }
 
 // SwapRequest Swap 请求（含 EIP-712 签名）
 type SwapRequest struct {
-	TokenIn      string `json:"token_in"`
-	TokenOut     string `json:"token_out"`
-	AmountIn     string `json:"amount_in"`
-	MinAmountOut string `json:"min_amount_out"`
-	Slippage     float64 `json:"slippage"` // 0.005 = 0.5%
-	Deadline     int64  `json:"deadline"`  // Unix timestamp
-	Signature    string `json:"signature"` // EIP-712 签名
+	TokenIn      string  `json:"token_in"`
+	TokenOut     string  `json:"token_out"`
+	AmountIn     string  `json:"amount_in"`
+	MinAmountOut string  `json:"min_amount_out"`
+	Slippage     float64 `json:"slippage"`  // 0.005 = 0.5%
+	Deadline     int64   `json:"deadline"`  // Unix timestamp
+	Signature    string  `json:"signature"` // EIP-712 签名
+	RawTx        string  `json:"raw_tx"`    // 用户钱包签好名的交易（0x 十六进制），提供时由后端广播
 }
 
 // SwapResponse Swap 响应
 type SwapResponse struct {
-	TxHash  string `json:"tx_hash"`
-	Status  string `json:"status"` // pending_confirmation / confirmed / rolled_back
-	Warning string `json:"warning,omitempty"`
+	TxHash       string  `json:"tx_hash,omitempty"` // 广播后的真实交易哈希，用 /api/v1/tx/{hash} 跟踪
+	Status       string  `json:"status"`            // validated（仅通过检查，未广播）/ pending（已广播）
+	PriceImpact  float64 `json:"price_impact"`
+	MinAmountOut string  `json:"min_amount_out"` // 推荐的最少应得数量
+	Warning      string  `json:"warning,omitempty"`
 }
 
 // PoolInfo 池子信息
