@@ -578,7 +578,7 @@ func (w *world) assertQuotesMatchQuoter(t *testing.T, stage string) {
 	t.Helper()
 	w.synced(t)
 	ctx := context.Background()
-	total, withCrossing, maxCrossed := 0, 0, 0
+	total, withCrossing, maxCrossed, bothFail := 0, 0, 0, 0
 	for _, c := range w.quoteCases() {
 		tokens := make([]string, len(c.tokens))
 		for i, token := range c.tokens {
@@ -593,7 +593,8 @@ func (w *world) assertQuotesMatchQuoter(t *testing.T, stage string) {
 
 		switch {
 		case onChainErr != nil && offChainErr != nil:
-			// 两边都报不出价（比如 1 wei 被手续费吃光后输出为 0，或流动性不足）也算一致
+			// 两边都报不出价（链上 revert、链下报错）也算一致，单独计数
+			bothFail++
 		case onChainErr != nil || offChainErr != nil:
 			t.Errorf("[%s] %s: 链上 err=%v，链下 err=%v", stage, c.name, onChainErr, offChainErr)
 		case onChain.Cmp(offChain) != 0:
@@ -607,8 +608,8 @@ func (w *world) assertQuotesMatchQuoter(t *testing.T, stage string) {
 			maxCrossed = crossed
 		}
 	}
-	t.Logf("[%s] 对比 %d 条报价（其中 %d 条穿越了已初始化的 tick，单条最多穿越 %d 个），链下与链上 Quoter 逐位一致",
-		stage, total, withCrossing, maxCrossed)
+	t.Logf("[%s] 对比 %d 条报价：%d 条两边数值逐位一致（其中 %d 条穿越了已初始化的 tick，单条最多 %d 个），%d 条两边都无法成交",
+		stage, total, total-bothFail, withCrossing, maxCrossed, bothFail)
 }
 
 func TestEndToEnd(t *testing.T) {
