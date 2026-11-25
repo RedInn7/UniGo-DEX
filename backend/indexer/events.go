@@ -10,6 +10,18 @@ import (
 // 索引器从区块链捕获原始日志后，解析为这些结构体，
 // 供 pool_state.go 用来重建链下状态。
 
+// InitializeEvent 对应 UniGoPool.Initialize 事件
+// 池子设定初始价格时触发（每个池子只有一次），此后链下才有价格可用
+type InitializeEvent struct {
+	PoolAddress  string
+	SqrtPriceX96 *big.Int // 初始价格
+	Tick         int32    // 初始价格对应的 tick
+	BlockNumber  uint64
+	Timestamp    uint64
+	TxHash       string
+	LogIndex     uint
+}
+
 // MintEvent 对应 UniGoPool.Mint 事件
 // 当用户添加流动性时触发
 type MintEvent struct {

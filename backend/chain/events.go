@@ -11,75 +11,34 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
+	"unigo-dex/chain/contractabi"
 	"unigo-dex/indexer"
 )
 
 // events.go — 合约事件解码
 //
-// 事件签名与 contracts/contracts/interfaces 下的 IUniGoPool.sol、IUniGoFactory.sol 一致。
+// 事件定义取自内嵌的合约 ABI（contractabi 包，由 Hardhat 编译产物生成），不手写签名。
 // 日志的 topics[0] 是事件签名哈希，indexed 参数在 topics[1:]，其余参数 ABI 编码在 data 里。
 // 解码结果是 indexer/events.go 中的事件结构，地址统一为小写十六进制。
 
-const eventsABIJSON = `[
-{"type":"event","name":"Mint","inputs":[
-  {"name":"sender","type":"address","indexed":false},
-  {"name":"owner","type":"address","indexed":true},
-  {"name":"tickLower","type":"int24","indexed":true},
-  {"name":"tickUpper","type":"int24","indexed":true},
-  {"name":"amount","type":"uint128","indexed":false},
-  {"name":"amount0","type":"uint256","indexed":false},
-  {"name":"amount1","type":"uint256","indexed":false}]},
-{"type":"event","name":"Burn","inputs":[
-  {"name":"owner","type":"address","indexed":true},
-  {"name":"tickLower","type":"int24","indexed":true},
-  {"name":"tickUpper","type":"int24","indexed":true},
-  {"name":"amount","type":"uint128","indexed":false},
-  {"name":"amount0","type":"uint256","indexed":false},
-  {"name":"amount1","type":"uint256","indexed":false}]},
-{"type":"event","name":"Swap","inputs":[
-  {"name":"sender","type":"address","indexed":true},
-  {"name":"recipient","type":"address","indexed":true},
-  {"name":"amount0","type":"int256","indexed":false},
-  {"name":"amount1","type":"int256","indexed":false},
-  {"name":"sqrtPriceX96","type":"uint160","indexed":false},
-  {"name":"liquidity","type":"uint128","indexed":false},
-  {"name":"tick","type":"int24","indexed":false}]},
-{"type":"event","name":"Collect","inputs":[
-  {"name":"owner","type":"address","indexed":true},
-  {"name":"recipient","type":"address","indexed":false},
-  {"name":"tickLower","type":"int24","indexed":true},
-  {"name":"tickUpper","type":"int24","indexed":true},
-  {"name":"amount0","type":"uint128","indexed":false},
-  {"name":"amount1","type":"uint128","indexed":false}]},
-{"type":"event","name":"Flash","inputs":[
-  {"name":"sender","type":"address","indexed":true},
-  {"name":"recipient","type":"address","indexed":true},
-  {"name":"amount0","type":"uint256","indexed":false},
-  {"name":"amount1","type":"uint256","indexed":false},
-  {"name":"paid0","type":"uint256","indexed":false},
-  {"name":"paid1","type":"uint256","indexed":false}]},
-{"type":"event","name":"PoolCreated","inputs":[
-  {"name":"token0","type":"address","indexed":true},
-  {"name":"token1","type":"address","indexed":true},
-  {"name":"fee","type":"uint24","indexed":true},
-  {"name":"tickSpacing","type":"int24","indexed":false},
-  {"name":"pool","type":"address","indexed":false}]}
-]`
-
-var (
-	eventsABI   abi.ABI
-	eventTopics []common.Hash // 所有关心的事件签名，用作 FilterLogs 的 topic0 过滤
-)
-
-func init() {
-	var err error
-	eventsABI, err = abi.JSON(strings.NewReader(eventsABIJSON))
-	if err != nil {
-		panic(err)
+// 关心的事件签名，用作 FilterLogs 的 topic0 过滤
+var eventTopics = func() []common.Hash {
+	var topics []common.Hash
+	for _, name := range []string{"Initialize", "Mint", "Burn", "Swap", "Collect", "Flash"} {
+		topics = append(topics, contractabi.Pool.Events[name].ID)
 	}
-	for _, ev := range eventsABI.Events {
-		eventTopics = append(eventTopics, ev.ID)
+	return append(topics, contractabi.Factory.Events["PoolCreated"].ID)
+}()
+
+// eventByID 按签名哈希查找 Pool / Factory 的事件定义
+func eventByID(id common.Hash) (*abi.Event, bool) {
+	if ev, err := contractabi.Pool.EventByID(id); err == nil {
+		return ev, true
 	}
+	if ev, err := contractabi.Factory.EventByID(id); err == nil {
+		return ev, true
+	}
+	return nil, false
 }
 
 // BlockEvents 拉取并解码指定区块内的事件，按 logIndex 升序
@@ -118,13 +77,13 @@ func (c *Client) decodeLog(lg types.Log, timestamp uint64) (interface{}, error) 
 	if lg.Removed || len(lg.Topics) == 0 {
 		return nil, nil
 	}
-	ev, err := eventsABI.EventByID(lg.Topics[0])
-	if err != nil {
+	ev, ok := eventByID(lg.Topics[0])
+	if !ok {
 		return nil, nil
 	}
 
 	args := make(map[string]interface{})
-	if err := eventsABI.UnpackIntoMap(args, ev.Name, lg.Data); err != nil {
+	if err := ev.Inputs.UnpackIntoMap(args, lg.Data); err != nil {
 		return nil, err
 	}
 	var indexed abi.Arguments
@@ -145,6 +104,11 @@ func (c *Client) decodeLog(lg types.Log, timestamp uint64) (interface{}, error) 
 	txHash := lg.TxHash.Hex()
 
 	switch ev.Name {
+	case "Initialize":
+		return &indexer.InitializeEvent{
+			PoolAddress: pool, SqrtPriceX96: num("sqrtPriceX96"), Tick: tick("tick"),
+			BlockNumber: lg.BlockNumber, Timestamp: timestamp, TxHash: txHash, LogIndex: lg.Index,
+		}, nil
 	case "Mint":
 		return &indexer.MintEvent{
 			PoolAddress: pool, Sender: addr("sender"), Owner: addr("owner"),

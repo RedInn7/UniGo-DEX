@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
 
+	"unigo-dex/chain/contractabi"
 	"unigo-dex/circuitbreaker"
 	"unigo-dex/indexer"
 )
@@ -102,7 +103,10 @@ func (e *env) send(to common.Address, data []byte) *types.Transaction {
 // emit 让 to 合约发出一条指定事件的日志
 func (e *env) emit(to common.Address, event string, indexed []interface{}, nonIndexed ...interface{}) *types.Transaction {
 	e.t.Helper()
-	ev := eventsABI.Events[event]
+	ev, ok := contractabi.Pool.Events[event]
+	if !ok {
+		ev = contractabi.Factory.Events[event]
+	}
 	data := ev.ID.Bytes()
 	for _, v := range indexed {
 		topics, err := abi.MakeTopics([]interface{}{v})
@@ -271,7 +275,7 @@ func TestDecodePoolCreatedOnlyFromFactory(t *testing.T) {
 func TestMalformedLogIsSkipped(t *testing.T) {
 	e := newEnv(t)
 	// 签名是 Swap，但 data 为空
-	swap := eventsABI.Events["Swap"]
+	swap := contractabi.Pool.Events["Swap"]
 	data := append(swap.ID.Bytes(), make([]byte, 64)...)
 	e.send(poolAddr, data)
 	e.emitSwap(userA, userB, 1, -1, 0)

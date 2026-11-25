@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 
@@ -363,6 +364,14 @@ func (idx *Indexer) handleEvent(event interface{}) {
 		idx.state.AddPool(NewPoolState(e.Pool, e.Token0, e.Token1, e.Fee, e.TickSpacing))
 		idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() { idx.state.RemovePool(e.Pool) }})
 		log.Printf("[Indexer] 处理 PoolCreated 事件: pool=%s block=%d", e.Pool, e.BlockNumber)
+	case *InitializeEvent:
+		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
+			pool.ApplyInitialize(e)
+			idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() {
+				pool.ApplyInitialize(&InitializeEvent{SqrtPriceX96: big.NewInt(0), BlockNumber: e.BlockNumber})
+			}})
+			log.Printf("[Indexer] 处理 Initialize 事件: pool=%s tick=%d block=%d", e.PoolAddress[:10], e.Tick, e.BlockNumber)
+		}
 	case *MintEvent:
 		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
 			pool.ApplyMint(e)

@@ -66,6 +66,16 @@ func NewPoolState(address, token0, token1 string, fee uint32, tickSpacing int32)
 	}
 }
 
+// ApplyInitialize 应用 Initialize 事件，设定初始价格和 tick
+func (p *PoolState) ApplyInitialize(event *InitializeEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.SqrtPriceX96 = new(big.Int).Set(event.SqrtPriceX96)
+	p.Tick = event.Tick
+	p.LastBlockNumber = event.BlockNumber
+}
+
 // ApplyMint 应用 Mint 事件，更新池子状态
 func (p *PoolState) ApplyMint(event *MintEvent) {
 	p.mu.Lock()
