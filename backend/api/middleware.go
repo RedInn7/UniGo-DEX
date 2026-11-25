@@ -73,8 +73,8 @@ type RateLimiter struct {
 }
 
 type tokenBucket struct {
-	tokens    int
-	lastTime  time.Time
+	tokens   int
+	lastTime time.Time
 }
 
 // NewRateLimiter 创建限流器

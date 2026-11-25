@@ -180,19 +180,36 @@ func main() {
 		Name: "UniGo-DEX", Version: "1", ChainID: chainID, VerifyingContract: verifyingContract,
 	}, 5*time.Minute)
 
+	// Chainlink 喂价：按币对配置聚合器地址，读链需要节点
+	var chainlinkReader *oracle.ChainlinkReader
+	if spec := os.Getenv("CHAINLINK_FEEDS"); spec != "" {
+		feeds, err := oracle.ParseFeeds(spec)
+		switch {
+		case err != nil:
+			log.Fatalf("CHAINLINK_FEEDS 配置有误: %v", err)
+		case chainClient == nil:
+			log.Printf("[启动] ⚠️ 配置了 %d 个 Chainlink 喂价，但没有连接节点，喂价不会生效", len(feeds))
+		default:
+			refresh := time.Duration(getEnvInt("CHAINLINK_REFRESH_SECONDS", int(oracle.DefaultRefreshInterval/time.Second))) * time.Second
+			chainlinkReader = oracle.NewChainlinkReader(chainClient, feeds, refresh)
+			log.Printf("[启动] 已配置 %d 个 Chainlink 喂价，读数缓存 %v", len(feeds), refresh)
+		}
+	}
+
 	server := api.NewServer(serverConfig, api.Deps{
-		Router:   routerInst,
-		State:    stateManager,
-		Indexer:  idx,
-		Cache:    appCache,
-		Oracle:   oracleInst,
-		Chain:    chainClient,
-		Gas:      gasEstimator,
-		Klines:   klines,
-		Guard:    guard,
-		Arb:      scanner,
-		Hub:      hub,
-		Verifier: verifier,
+		Router:    routerInst,
+		State:     stateManager,
+		Indexer:   idx,
+		Cache:     appCache,
+		Oracle:    oracleInst,
+		Chain:     chainClient,
+		Gas:       gasEstimator,
+		Klines:    klines,
+		Guard:     guard,
+		Arb:       scanner,
+		Hub:       hub,
+		Verifier:  verifier,
+		Chainlink: chainlinkReader,
 	})
 
 	// 在独立协程中启动 HTTP 服务器

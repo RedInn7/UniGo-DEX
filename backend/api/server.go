@@ -96,6 +96,8 @@ type Deps struct {
 	Arb      *arb.Scanner
 	Hub      *ws.Hub
 	Verifier *eip712.Verifier
+	// Chainlink 喂价读取器；nil 表示没有配置任何喂价
+	Chainlink *oracle.ChainlinkReader
 }
 
 // Server API 服务器
@@ -113,25 +115,27 @@ type Server struct {
 	arb        *arb.Scanner
 	hub        *ws.Hub
 	verifier   *eip712.Verifier
+	chainlink  *oracle.ChainlinkReader
 	httpServer *http.Server
 }
 
 // NewServer 创建 API 服务器
 func NewServer(config ServerConfig, deps Deps) *Server {
 	return &Server{
-		config:   config,
-		router:   deps.Router,
-		state:    deps.State,
-		idxer:    deps.Indexer,
-		cache:    deps.Cache,
-		oracle:   deps.Oracle,
-		chain:    deps.Chain,
-		gas:      deps.Gas,
-		klines:   deps.Klines,
-		guard:    deps.Guard,
-		arb:      deps.Arb,
-		hub:      deps.Hub,
-		verifier: deps.Verifier,
+		config:    config,
+		router:    deps.Router,
+		state:     deps.State,
+		idxer:     deps.Indexer,
+		cache:     deps.Cache,
+		oracle:    deps.Oracle,
+		chain:     deps.Chain,
+		gas:       deps.Gas,
+		klines:    deps.Klines,
+		guard:     deps.Guard,
+		arb:       deps.Arb,
+		hub:       deps.Hub,
+		verifier:  deps.Verifier,
+		chainlink: deps.Chainlink,
 	}
 }
 
@@ -257,6 +261,7 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		Gas:          s.gas.Estimate(r.Context(), route.GasEstimate),
 		TicksCrossed: route.TicksCrossed,
 		IsDegraded:   route.IsDegraded,
+		PriceChecks:  safety.checks,
 		Warning:      joinWarnings(safety.warning, mevWarning),
 	}
 
