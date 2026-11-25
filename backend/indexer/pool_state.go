@@ -263,6 +263,13 @@ func (m *PoolStateManager) AddPool(pool *PoolState) {
 	m.pools[pool.Address] = pool
 }
 
+// RemovePool 移除池子（创建它的区块被 Reorg 回滚时使用）
+func (m *PoolStateManager) RemovePool(address string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pools, address)
+}
+
 // GetAllPools 获取所有池子的快照
 func (m *PoolStateManager) GetAllPools() []PoolSnapshot {
 	m.mu.RLock()

@@ -83,7 +83,8 @@ type Router struct {
 	searchStatePool sync.Pool
 
 	// 统计
-	stats RouterStats
+	stats   RouterStats
+	statsMu sync.Mutex
 }
 
 // RouterStats 路由引擎统计
@@ -92,7 +93,6 @@ type RouterStats struct {
 	DegradedRequests uint64 // 降级到直连的次数
 	TimeoutCount     uint64
 	AvgLatencyMs     float64
-	mu               sync.Mutex
 }
 
 // searchState 路由搜索的临时状态（通过 sync.Pool 复用）
@@ -139,9 +139,9 @@ func (r *Router) FindBestRoute(
 	tokenIn, tokenOut string,
 	amountIn *big.Int,
 ) (*Route, error) {
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.TotalRequests++
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
 
 	start := time.Now()
 
@@ -165,16 +165,16 @@ func (r *Router) FindBestRoute(
 	route, err := r.searchRoutes(routeCtx, tokenIn, tokenOut, amountIn)
 
 	elapsed := time.Since(start)
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.AvgLatencyMs = (r.stats.AvgLatencyMs*float64(r.stats.TotalRequests-1) + float64(elapsed.Milliseconds())) / float64(r.stats.TotalRequests)
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
 
 	if err != nil || route == nil {
 		if routeCtx.Err() == context.DeadlineExceeded {
 			log.Printf("[Router] ⏰ 路由搜索超时（%v），降级到直连路径", r.config.RouteTimeout)
-			r.stats.mu.Lock()
+			r.statsMu.Lock()
 			r.stats.TimeoutCount++
-			r.stats.mu.Unlock()
+			r.statsMu.Unlock()
 		}
 		// === Level 2：降级路径 ===
 		return r.degradedRoute(tokenIn, tokenOut, amountIn, "search_failed")
@@ -306,9 +306,9 @@ func (r *Router) degradedRoute(
 	amountIn *big.Int,
 	reason string,
 ) (*Route, error) {
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.DegradedRequests++
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
 
 	log.Printf("[Router] 🔄 降级路由（原因: %s）：%s -> %s", reason, tokenIn, tokenOut)
 
@@ -355,7 +355,7 @@ func (r *Router) estimateOutput(pools []indexer.PoolSnapshot, amountIn *big.Int)
 
 // GetStats 获取路由统计
 func (r *Router) GetStats() RouterStats {
-	r.stats.mu.Lock()
-	defer r.stats.mu.Unlock()
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
 	return r.stats
 }

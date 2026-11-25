@@ -59,7 +59,7 @@ func main() {
 	log.Println("[启动] 初始化事件索引器...")
 	idxConfig := indexer.DefaultConfig()
 	idxConfig.RPCURL = getEnv("RPC_URL", "http://127.0.0.1:8545")
-	idx := indexer.NewIndexer(idxConfig, stateManager)
+	idx := indexer.NewIndexer(idxConfig, stateManager, nil)
 	if err := idx.Start(ctx); err != nil {
 		log.Fatalf("索引器启动失败: %v", err)
 	}
