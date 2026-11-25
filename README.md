@@ -2,7 +2,7 @@
 
 基于 Uniswap V3 集中流动性设计的去中心化交易所全栈实现（Solidity + Go + The Graph）。
 
-本项目不是一个"调 SDK 跑 Demo"的教程，而是从底层数学库到生产级系统设计的完整实现。涵盖链上合约（5 个核心合约 + 11 个库）、链下 Go 后端（18 个包，通过 go-ethereum 连接真实节点）、The Graph 子图，以及把三者接在一起验证的端到端测试。
+本项目不是一个"调 SDK 跑 Demo"的教程，而是从底层数学库到生产级系统设计的完整实现。涵盖链上合约（5 个核心合约 + 11 个库）、链下 Go 后端（18 个包，通过 go-ethereum 连接真实节点）、The Graph 子图，以及把它们接在一起验证的端到端测试和一套可复现的压测。
 
 ---
 
@@ -65,9 +65,10 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 1. **深度理解 AMM 数学**：不是调 SDK，而是从 `mulDiv` 全精度乘除到 `TickMath` 查表法完整实现，再到手续费累计、TWAP 预言机、闪电贷
 2. **链上链下逐位一致**：Go 后端用 `math/big` 复现 Solidity 数学库，并逐 tick 模拟 swap；集成测试在真实节点上把链下报价与链上 Quoter 的返回值逐位比对
 3. **真实的链交互**：基于 go-ethereum 索引事件、处理 Reorg、读取 TWAP、构造待签名交易、广播并跟踪确认，后端不托管私钥
-4. **DeFi 安全**：现价 / TWAP / Chainlink 三方交叉校验拒绝被操纵的价格，三明治攻击检测，EIP-712 验签防重放，合约侧的 tick 流动性上限与 SafeERC20
+4. **DeFi 安全**：现价 / TWAP / 链上 Chainlink 喂价三方交叉校验拒绝被操纵的价格，三明治攻击检测，EIP-712 验签防重放，合约侧的 tick 流动性上限与 SafeERC20
 5. **生产级系统设计**：Reorg 回滚、缓存击穿、路由降级、断路器、背压控制、慢客户端隔离等真实环境中的问题
-6. **Go 工程实践**：Goroutine 池化与 Benchmark 对比、slog 结构化日志、Prometheus 指标、SSE 实时推送、Token Bucket 限流
+6. **Go 工程实践**：Goroutine 池化与 Benchmark 对比、slog 结构化日志与贯穿请求的 Trace ID、Prometheus 指标、SSE 实时推送、Token Bucket 限流
+7. **用数据说话**：k6 压测 HTTP 吞吐与延迟，并用后端自己的指标逐个场景核对请求数；限流、背压、慢客户端隔离、Reorg 回滚都有实测结果
 
 ### 技术栈
 
@@ -81,7 +82,8 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 | 可观测性 | slog 结构化日志, Prometheus 文本格式指标 |
 | 实时通信 | Server-Sent Events (SSE) |
 | 密码学 | keccak256, EIP-712, ECDSA（secp256k1 签名恢复） |
-| 测试 | Hardhat + Chai（109 个合约用例）, go test（80 个单元测试）, 自起节点的端到端集成测试 |
+| 测试 | Hardhat + Chai（109 个合约用例）, go test（101 个单元测试）, 自起节点的端到端集成测试 |
+| 压测 | k6（HTTP）, go test -bench, 自带的追块 / SSE 压测工具 |
 
 ---
 
@@ -92,16 +94,16 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
           │ HTTP 请求、SSE 订阅                 ▲ 待签名交易（钱包签名后经 /swap 回传 raw_tx）
           ▼                                    │
 ┌─ API Server（backend/api） ──────────────────────────────────────────────────────────────────┐
-│ 中间件链：CORS → Logging → 每 IP 限流（Token Bucket）→ 全局并发信号量（503 背压）            │
+│ 中间件链：CORS → Trace → Metrics → Logging → 每 IP 限流（令牌桶）→ 并发信号量（503 背压）    │
 │ 报价 /quote · 构造 /swap/build · 提交 /swap · 状态 /tx · 行情 /klines /trades /twap          │
 │ 告警 /mev/alerts · 套利 /arbitrage/opportunities · 推送 /stream · /status /metrics /health   │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
           │ 请求路径
           ▼
 ┌─ 报价与交易前检查 ───────────────────────────────────────────────────────────────────────────┐
-│ Cache       Singleflight 合并并发请求；key 带区块号，出新块自动失效                          │
+│ Cache       Singleflight 合并并发请求；key 带区块号，出新块自动失效；条目数有上限            │
 │ Router      DFS 枚举路径 → Worker Pool 并发逐 tick 模拟 → 200ms 超时降级到直连池             │
-│ Oracle      池内现价 / TWAP / Chainlink 三方交叉校验，疑似操纵时拒绝交易                     │
+│ Oracle      池内现价 / TWAP / 链上 Chainlink 喂价三方交叉校验，偏离过大时拒绝交易            │
 │ MEV Guard   价格冲击、deadline、min_amount_out 检查，推荐滑点                                │
 │ EIP-712     验签：Deadline + Nonce + Domain Separator                                        │
 │ Gas         EIP-1559 成本评估（baseFee + priorityFee）                                       │
@@ -117,7 +119,7 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
           ▲ 事件回放 / Reorg 撤销                          │ trade / kline / mev_alert / arbitrage
           │                                               ▼
 ┌─ Indexer 事件索引器 ─────────────────┐      ┌─ SSE Hub ──────────────────────────────────┐
-│ 轮询区块 → 父哈希校验 → 应用事件     │      │ 非阻塞扇出，慢客户端直接断开               │
+│ 分段追块 → 父哈希校验 → 应用事件     │      │ 非阻塞扇出，慢客户端直接断开               │
 │ Reorg：找分叉点 → 逆序执行撤销日志   │      │ → GET /api/v1/stream                       │
 │        → 从分叉点重新索引            │      └────────────────────────────────────────────┘
 └──────────────────────────────────────┘
@@ -125,7 +127,7 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
           ▼
 ┌─ chain.Client（go-ethereum） ────────────────────────────────────────────────────────────────┐
 │ ABI 由 Hardhat 编译产物生成并内嵌 · 所有 RPC 调用经断路器                                    │
-│ 区块头 / 日志解码 · eth_call（slot0、observe、Quoter）· 调用数据编码 · 广播 · 回执 · 费用    │
+│ 区块头 / 批量日志解码 · eth_call（slot0、observe、Quoter、Chainlink）· 编码 · 广播 · 回执    │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
           │ JSON-RPC
           ▼
@@ -137,6 +139,8 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 │   期限 / 滑点 / 多跳 / 精确输出  │                                                           │
 │   UniGoQuoter ───────────────────┘            revert-catch 报价                              │
 │                                                                                              │
+│   Chainlink 聚合器（AggregatorV3Interface）  latestRoundData 喂价                            │
+│                                                                                              │
 │   事件：PoolCreated · Initialize · Mint · Burn · Collect · Swap · Flash                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
           │ 同一批事件
@@ -145,7 +149,7 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 │ Factory / Pool / Swap / Mint / Burn / Flash 实体 + 1m / 5m / 1h / 1d K 线 → GraphQL 查询     │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 
-横切关注点：Metrics（Counter / Gauge / Histogram，P50 / P95 / P99）· slog 结构化日志
+横切关注点：Metrics（Counter / Gauge / Histogram，P50 / P95 / P99）· slog 结构化日志 + Trace ID
             断路器（保护 RPC）· Goroutine 池（路径评估）
 ```
 
@@ -179,26 +183,30 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 | 后端 | 链下数学精确复现 | math/big + 相同魔数常量和取整方向 | `backend/math/` |
 | 后端 | 链交互层 | go-ethereum + 由编译产物生成并内嵌的 ABI | `backend/chain/`, `backend/chain/contractabi/` |
 | 后端 | 链数据源接口 | ChainSource：真实节点 / 模拟源可替换 | `backend/indexer/indexer.go` |
+| 后端 | 分段追块 | 每 500 个区块一次 eth_getLogs + 逐条核对日志的区块哈希 | `backend/indexer/indexer.go`, `backend/chain/events.go` |
 | 后端 | Reorg 检测 + 状态回滚 | parentHash 校验 + 找分叉点 + 撤销日志逆序回放 | `backend/indexer/indexer.go` |
 | 后端 | 逐 tick 精确的链下 swap 模拟 | 复现 swap 主循环，在相同的 word 边界切步 | `backend/router/quote.go` |
 | 后端 | 路由搜索 + 200ms 超时降级 | DFS 枚举 + Worker Pool 并发评估 + 直连池 fallback | `backend/router/router.go` |
-| 后端 | Singleflight 防缓存击穿 | sync.WaitGroup 请求合并 + 按区块号失效 | `backend/cache/cache.go` |
-| 后端 | 三方价格交叉校验 | 现价 / TWAP / Chainlink + 操纵拒绝 + 保护模式 | `backend/oracle/oracle.go`, `backend/api/trade.go` |
+| 后端 | Singleflight 防缓存击穿 | sync.WaitGroup 请求合并 + 按区块号失效 + 条目数上限 | `backend/cache/cache.go` |
+| 后端 | 读取链上 Chainlink 喂价 | latestRoundData 五项有效性检查 + 口径换算 + 缓存刷新 | `backend/oracle/chainlink.go` |
+| 后端 | 三方价格交叉校验 | 现价 / TWAP / Chainlink + 偏离拒绝 + 不可用时降级为两方 + 保护模式 | `backend/oracle/oracle.go`, `backend/api/trade.go` |
 | 后端 | 待签名交易构造 | 路由 → Manager 调用数据 + 链上报价抽检 | `backend/api/trade.go`, `backend/chain/contracts.go` |
 | 后端 | 交易状态查询 | 回执 + 确认数：pending → confirmed / reverted | `backend/chain/client.go` |
 | 后端 | EIP-712 三层防重放 | Deadline + Nonce + DomainSeparator，拒绝高 s 签名 | `backend/eip712/eip712.go` |
 | 后端 | EIP-1559 Gas 成本评估 | baseFee + priorityFee，静态值兜底 | `backend/gas/gas.go` |
-| 后端 | K 线与成交 | 六周期聚合 + Reorg 重算 | `backend/kline/kline.go` |
-| 后端 | 三明治攻击检测 | 同块同池：抢跑 → 受害者同向 → 反向平仓 | `backend/mev/mev.go` |
-| 后端 | 套利机会扫描 | 逐 tick 模拟的利润函数 + 三分搜索最优借入量 | `backend/arb/arb.go` |
+| 后端 | K 线与成交 | 六周期聚合 + 定点整数成交量 + 按区块检查点回滚 | `backend/kline/kline.go` |
+| 后端 | 三明治攻击检测 | 同块同池：抢跑 → 受害者同向 → 反向平仓；按交易方和方向建索引，单笔 O(log n) | `backend/mev/mev.go` |
+| 后端 | 套利机会扫描 | 逐 tick 模拟的利润函数 + 三分搜索最优借入量 + 放贷池余额检查 | `backend/arb/arb.go` |
 | 后端 | SSE 实时推送 | Hub 发布-订阅 + 非阻塞扇出 + 慢客户端断开 | `backend/ws/ws.go` |
 | 后端 | 断路器（三态状态机） | Closed→Open→HalfOpen + 探测恢复 | `backend/circuitbreaker/` |
 | 后端 | Goroutine 池化 | 固定 Worker + 有界 Channel 复用 | `backend/workerpool/pool.go` |
-| 后端 | 结构化日志 | slog + context TraceID | `backend/logging/logging.go` |
+| 后端 | 结构化日志 + 链路追踪 | slog + X-Trace-Id 中间件 + context 传播 | `backend/logging/logging.go`, `backend/api/middleware.go` |
 | 后端 | Prometheus 风格指标 | Counter/Gauge/Histogram + P99 | `backend/metrics/metrics.go` |
-| 后端 | Token Bucket + 并发信号量 | 每 IP 限流 + 全局 503 背压 | `backend/api/middleware.go` |
+| 后端 | Token Bucket + 并发信号量 | 每 IP 100 请求/秒、突发 200 + 全局 503 背压 | `backend/api/middleware.go` |
 | 测试 | 不变量随机测试 | 固定种子 300 步随机操作，每步检查 4 条不变量 | `contracts/test/Invariants.test.js` |
-| 测试 | 端到端集成测试 | 自起 Hardhat 节点，11 个全链路场景 | `backend/integration/` |
+| 测试 | 端到端集成测试 | 自起 Hardhat 节点，12 个全链路场景 | `backend/integration/` |
+| 压测 | HTTP 吞吐与保护生效 | k6 八个场景 + 后端指标交叉核对请求数 | `bench/`, `bench/REPORT.md` |
+| 压测 | 追块、Reorg、SSE | 对本地链追块与回滚耗时、推送延迟与慢客户端隔离 | `backend/cmd/bench/` |
 
 ---
 
