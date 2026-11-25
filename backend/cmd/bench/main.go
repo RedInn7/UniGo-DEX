@@ -16,7 +16,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -84,8 +83,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fatal("用法: bench chase|sse [参数]")
 	}
-	// 追块时每个事件一行日志，压测只量处理本身，日志丢弃
-	log.SetOutput(io.Discard)
+	// 压测只量处理本身，日志丢弃
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	switch os.Args[1] {

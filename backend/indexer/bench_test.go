@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"math/big"
 	"testing"
@@ -127,7 +126,6 @@ func replay(b *testing.B, chain *memoryChain, withListeners bool) {
 
 // BenchmarkReplay 回放 2000 个区块、2 万个事件
 func BenchmarkReplay(b *testing.B) {
-	log.SetOutput(io.Discard) // 日志不落盘，只量处理本身
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	chain := buildChain()
 

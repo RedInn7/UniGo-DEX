@@ -51,27 +51,27 @@ func (s *Server) checkPriceSafety(ctx context.Context, route *router.Route, slip
 		case oracle.ChainlinkDeviated:
 			result.rejected = true
 			warnings = append(warnings, fmt.Sprintf(
-				"⚠️ 池子 %s 的现价偏离 Chainlink 喂价 %.2f%%（阈值 %.2f%%），已拒绝交易。",
+				"池子 %s 的现价偏离 Chainlink 喂价 %.2f%%（阈值 %.2f%%），已拒绝交易。",
 				pool.Address, check.ChainlinkDeviation*100, s.oracle.MaxDeviation()*100))
 		case oracle.ChainlinkUnavailable:
 			warnings = append(warnings, fmt.Sprintf(
-				"⚠️ 池子 %s 的 Chainlink 喂价不可用（%s），价格校验已降级，不再参考该喂价。", pool.Address, check.ChainlinkDetail))
+				"池子 %s 的 Chainlink 喂价不可用（%s），价格校验已降级，不再参考该喂价。", pool.Address, check.ChainlinkDetail))
 		}
 
 		switch check.Status {
 		case oracle.TWAPDeviated:
 			result.rejected = true
 			warnings = append(warnings, fmt.Sprintf(
-				"⚠️ 池子 %s 的现价偏离 %d 秒 TWAP %.2f%%，疑似被单区块操纵，已拒绝交易。", pool.Address, check.Window, check.Deviation*100))
+				"池子 %s 的现价偏离 %d 秒 TWAP %.2f%%，疑似被单区块操纵，已拒绝交易。", pool.Address, check.Window, check.Deviation*100))
 		case oracle.TWAPUnavailable:
 			if s.chain != nil {
 				warnings = append(warnings, fmt.Sprintf(
-					"⚠️ 池子 %s 的 TWAP 不可用（%s），无法校验现价是否被操纵。", pool.Address, check.Detail))
+					"池子 %s 的 TWAP 不可用（%s），无法校验现价是否被操纵。", pool.Address, check.Detail))
 			}
 		default:
 			if check.Degraded {
 				warnings = append(warnings, fmt.Sprintf(
-					"⚠️ 池子 %s 的预言机观测不足，TWAP 窗口只有 %d 秒（要求 %d 秒），抗操纵能力较弱。",
+					"池子 %s 的预言机观测不足，TWAP 窗口只有 %d 秒（要求 %d 秒），抗操纵能力较弱。",
 					pool.Address, check.Window, s.config.TWAPWindow))
 			}
 		}
@@ -222,7 +222,7 @@ func (s *Server) handleBuildSwap(w http.ResponseWriter, r *http.Request) {
 		route, err = s.router.FindBestRoute(r.Context(), tokenIn, tokenOut, amount)
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "route search failed: "+err.Error())
+		writeError(w, http.StatusNotFound, "no route: "+err.Error())
 		return
 	}
 
@@ -263,7 +263,7 @@ func (s *Server) handleBuildSwap(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.OnchainAmountOut, resp.QuoteConsistent = onchain.String(), &consistent
 		if !consistent {
-			warnings = append(warnings, "⚠️ 链下报价与链上 Quoter 不一致（链下状态可能落后于链上），滑点保护已按较低的一方计算。")
+			warnings = append(warnings, "链下报价与链上 Quoter 不一致（链下状态可能落后于链上），滑点保护已按较低的一方计算。")
 			if onchain.Cmp(quoted) < 0 {
 				quoted = onchain
 			}
@@ -306,7 +306,7 @@ func (s *Server) handleBuildSwap(w http.ResponseWriter, r *http.Request) {
 			if estimated, err := s.chain.EstimateGas(r.Context(), req.From, s.config.ManagerAddress, data); err == nil {
 				resp.GasLimit, resp.GasLimitSource = estimated+estimated/5, "node"
 			} else {
-				warnings = append(warnings, "⚠️ 节点模拟该交易失败（常见原因：from 尚未授权 Manager 或余额不足），gas 为静态估算。")
+				warnings = append(warnings, "节点模拟该交易失败（常见原因：from 尚未授权 Manager 或余额不足），gas 为静态估算。")
 			}
 		}
 	}

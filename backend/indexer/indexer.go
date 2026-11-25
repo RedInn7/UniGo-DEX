@@ -2,11 +2,12 @@ package indexer
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math/big"
 	"sync"
 	"time"
 
+	"unigo-dex/logging"
 	"unigo-dex/metrics"
 )
 
@@ -30,8 +31,8 @@ import (
 //   2. 每收到新区块时，验证其 parentHash 是否与已知的前一个区块一致
 //   3. 不一致则说明发生了 Reorg：向前找到分叉点，撤销分叉点之后的状态变更，
 //      再从分叉点重新索引
-//   4. 数据库状态不直接标记为 Success，而是先进入 Pending_Confirmation
-//   5. 等待 K 个确认后才标记为最终确认
+//   4. 交易状态查询（GET /api/v1/tx/{hash}）按同一个确认深度 K 判定：
+//      已打包但不足 K 个确认是 pending_confirmation，达到 K 个才是 confirmed
 
 // BlockInfo 存储区块基本信息，用于 Reorg 检测
 type BlockInfo struct {
@@ -41,24 +42,10 @@ type BlockInfo struct {
 	Timestamp  time.Time
 }
 
-// ConfirmationStatus 交易确认状态（延迟确认状态机）
-type ConfirmationStatus int
-
-const (
-	// StatusPending 等待确认（刚检测到事件）
-	StatusPending ConfirmationStatus = iota
-	// StatusPendingConfirmation 软确认（已有 1-K 个确认）
-	StatusPendingConfirmation
-	// StatusConfirmed 最终确认（已有 K+ 个确认）
-	StatusConfirmed
-	// StatusRolledBack 已回滚（因 Reorg 被撤销）
-	StatusRolledBack
-)
-
 // ChainSource 链数据源
 //
 // 索引器只依赖这个接口，不关心区块从哪来：
-//   - chain.Source：通过 go-ethereum 连接真实节点
+//   - chain.Client：通过 go-ethereum 连接真实节点
 //   - simSource：未配置节点时的模拟源（只出空区块）
 type ChainSource interface {
 	// LatestBlock 返回最新区块号
@@ -173,8 +160,7 @@ func (idx *Indexer) ConfirmationBlocks() uint64 {
 // 区块轮询协程持续拉取新区块、检测 Reorg，并同步处理区块内的事件。
 // 事件与回滚在同一个协程里顺序执行，保证状态变更的顺序与链上一致。
 func (idx *Indexer) Start(ctx context.Context) error {
-	log.Printf("[Indexer] 启动索引器，起始区块: %d, 确认深度: %d",
-		idx.config.StartBlock, idx.config.ConfirmationBlocks)
+	logging.L(ctx).Info("启动索引器", "start_block", idx.config.StartBlock, "confirmation_blocks", idx.config.ConfirmationBlocks)
 
 	go idx.pollBlocks(ctx)
 
@@ -191,7 +177,7 @@ func (idx *Indexer) pollBlocks(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[Indexer] 区块轮询停止")
+			logging.L(ctx).Info("区块轮询停止")
 			return
 		case <-ticker.C:
 			next = idx.syncOnce(ctx, next)
@@ -211,7 +197,7 @@ func (idx *Indexer) SyncOnce(ctx context.Context, next uint64) uint64 {
 func (idx *Indexer) syncOnce(ctx context.Context, next uint64) uint64 {
 	latest, err := idx.source.LatestBlock(ctx)
 	if err != nil {
-		log.Printf("[Indexer] 获取最新区块号失败: %v", err)
+		logging.L(ctx).Warn("获取最新区块号失败", "err", err)
 		return next
 	}
 	if limit := next + idx.config.MaxBlockRange; idx.config.MaxBlockRange > 0 && latest >= limit {
@@ -221,7 +207,7 @@ func (idx *Indexer) syncOnce(ctx context.Context, next uint64) uint64 {
 	for next <= latest && ctx.Err() == nil {
 		n, err := idx.processBlock(ctx, next)
 		if err != nil {
-			log.Printf("[Indexer] 处理区块 %d 失败: %v", next, err)
+			logging.L(ctx).Warn("处理区块失败", "block", next, "err", err)
 			break
 		}
 		next = n
@@ -249,9 +235,8 @@ func (idx *Indexer) processBlock(ctx context.Context, blockNumber uint64) (uint6
 		idx.blockHistoryMu.RUnlock()
 
 		if hasPrev && block.ParentHash != prevBlock.Hash {
-			log.Printf("[Indexer] ⚠️ 检测到 Reorg！区块 %d 的 parentHash 不匹配", blockNumber)
-			log.Printf("[Indexer]   期望: %s", prevBlock.Hash)
-			log.Printf("[Indexer]   实际: %s", block.ParentHash)
+			logging.L(ctx).Warn("检测到 Reorg：parentHash 与本地记录的上一个区块不一致",
+				"block", blockNumber, "expected_parent", prevBlock.Hash, "actual_parent", block.ParentHash)
 
 			forkBlock, err := idx.findForkBlock(ctx, blockNumber-1)
 			if err != nil {
@@ -306,8 +291,8 @@ func (idx *Indexer) findForkBlock(ctx context.Context, from uint64) (uint64, err
 		known, ok := idx.blockHistory[n]
 		idx.blockHistoryMu.RUnlock()
 		if !ok {
-			log.Printf("[Indexer] ⚠️ Reorg 深度超过保留的历史（%d 个区块），只能回滚到区块 %d",
-				idx.maxHistoryDepth, n+1)
+			logging.L(ctx).Warn("Reorg 深度超过保留的历史，只能回滚到最早保留的区块",
+				"history_depth", idx.maxHistoryDepth, "rollback_to", n+1)
 			return n + 1, nil
 		}
 
@@ -331,7 +316,7 @@ func (idx *Indexer) findForkBlock(ctx context.Context, from uint64) (uint64, err
 //  2. 通知订阅者丢弃这些区块的数据（K 线、MEV 告警）
 //  3. 清理分叉区块的哈希记录，由轮询协程从分叉点重新索引
 func (idx *Indexer) handleReorg(forkBlock uint64) {
-	log.Printf("[Indexer] 🔄 执行 Reorg 回滚，从区块 %d 重新索引", forkBlock)
+	slog.Warn("执行 Reorg 回滚并重新索引", "fork_block", forkBlock)
 
 	idx.statsMu.Lock()
 	idx.stats.ReorgsDetected++
@@ -348,7 +333,7 @@ func (idx *Indexer) handleReorg(forkBlock uint64) {
 
 	if forkBlock > 0 {
 		rolledBack := idx.state.RollbackToBlock(forkBlock - 1)
-		log.Printf("[Indexer] 回滚了 %d 个池子的状态", rolledBack)
+		slog.Info("池子状态已回滚", "pools", rolledBack)
 	}
 
 	for _, l := range idx.listeners {
@@ -371,14 +356,14 @@ func (idx *Indexer) handleEvent(event interface{}) {
 	case *PoolCreatedEvent:
 		idx.state.AddPool(NewPoolState(e.Pool, e.Token0, e.Token1, e.Fee, e.TickSpacing))
 		idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() { idx.state.RemovePool(e.Pool) }})
-		log.Printf("[Indexer] 处理 PoolCreated 事件: pool=%s block=%d", e.Pool, e.BlockNumber)
+		slog.Info("发现新池子", "pool", e.Pool, "token0", e.Token0, "token1", e.Token1, "fee", e.Fee, "block", e.BlockNumber)
 	case *InitializeEvent:
 		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
 			pool.ApplyInitialize(e)
 			idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() {
 				pool.ApplyInitialize(&InitializeEvent{SqrtPriceX96: big.NewInt(0), BlockNumber: e.BlockNumber})
 			}})
-			log.Printf("[Indexer] 处理 Initialize 事件: pool=%s tick=%d block=%d", e.PoolAddress[:10], e.Tick, e.BlockNumber)
+			slog.Debug("处理 Initialize 事件", "pool", e.PoolAddress, "tick", e.Tick, "block", e.BlockNumber)
 		}
 	case *MintEvent:
 		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
@@ -386,7 +371,7 @@ func (idx *Indexer) handleEvent(event interface{}) {
 			idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() {
 				pool.ApplyBurn(&BurnEvent{TickLower: e.TickLower, TickUpper: e.TickUpper, Amount: e.Amount, BlockNumber: e.BlockNumber})
 			}})
-			log.Printf("[Indexer] 处理 Mint 事件: pool=%s block=%d", e.PoolAddress[:10], e.BlockNumber)
+			slog.Debug("处理 Mint 事件", "pool", e.PoolAddress, "block", e.BlockNumber)
 		}
 	case *BurnEvent:
 		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
@@ -394,7 +379,7 @@ func (idx *Indexer) handleEvent(event interface{}) {
 			idx.undoLog = append(idx.undoLog, undoEntry{e.BlockNumber, func() {
 				pool.ApplyMint(&MintEvent{TickLower: e.TickLower, TickUpper: e.TickUpper, Amount: e.Amount, BlockNumber: e.BlockNumber})
 			}})
-			log.Printf("[Indexer] 处理 Burn 事件: pool=%s block=%d", e.PoolAddress[:10], e.BlockNumber)
+			slog.Debug("处理 Burn 事件", "pool", e.PoolAddress, "block", e.BlockNumber)
 		}
 	case *SwapEvent:
 		if pool, ok := idx.state.GetPool(e.PoolAddress); ok {
@@ -406,8 +391,7 @@ func (idx *Indexer) handleEvent(event interface{}) {
 			for _, l := range idx.listeners {
 				l.OnSwap(e)
 			}
-			log.Printf("[Indexer] 处理 Swap 事件: pool=%s tick=%d block=%d",
-				e.PoolAddress[:10], e.Tick, e.BlockNumber)
+			slog.Debug("处理 Swap 事件", "pool", e.PoolAddress, "tick", e.Tick, "block", e.BlockNumber)
 		}
 	}
 	// Collect / Flash 不改变价格和流动性，只计数

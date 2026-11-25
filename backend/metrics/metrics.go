@@ -291,6 +291,8 @@ var (
 	HTTPRequestsTotal          = DefaultRegistry.Counter("http_requests_total")
 	HTTPRequestDuration        = DefaultRegistry.Histogram("http_request_duration_ms", DefaultLatencyBuckets())
 	HTTPActiveConnections      = DefaultRegistry.Gauge("http_active_connections")
+	HTTPRateLimited            = DefaultRegistry.Counter("http_rate_limited_total")         // 被每 IP 限流拒绝（429）
+	HTTPConcurrencyRejected    = DefaultRegistry.Counter("http_concurrency_rejected_total") // 被全局并发上限拒绝（503）
 	RouterRequestsTotal        = DefaultRegistry.Counter("router_requests_total")
 	RouterDegradedTotal        = DefaultRegistry.Counter("router_degraded_total")
 	RouterLatency              = DefaultRegistry.Histogram("router_latency_ms", DefaultLatencyBuckets())

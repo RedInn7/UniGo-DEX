@@ -3,13 +3,13 @@ package router
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/big"
 	"runtime"
 	"sync"
 	"time"
 
 	"unigo-dex/indexer"
+	"unigo-dex/logging"
 	"unigo-dex/metrics"
 	"unigo-dex/workerpool"
 )
@@ -24,21 +24,21 @@ import (
 //
 // 因此采用 Fail-soft 而非 Fail-fast 策略：
 //
-//   Level 1（正常模式）：BFS 搜索多跳最优路径
+//   Level 1（正常模式）：DFS 枚举多跳候选路径，取产出最高的一条
 //     - 最大跳数：3
 //     - 超时：200ms
 //     - 先枚举候选路径，再用 Worker Pool 并发逐 tick 模拟每条路径的产出
 //
 //   Level 2（降级模式）：直连路径 fallback
-//     - 当 Level 1 超时或失败
-//     - 自动退回到硬编码的直连路径（如 ETH → USDC 单池）
+//     - 当 Level 1 超时，或并发搜索数已达上限
+//     - 只在 tokenIn / tokenOut 的直连池里选产出最高的（可能有多个费率档）
 //     - 牺牲部分价格最优性，优先保证系统可用性
 //
 // === 背压机制 ===
 //
-// 使用有界 Channel 限制请求队列长度，避免请求无限堆积：
-//   - routeRequestChan 容量 = maxConcurrentRoutes
-//   - 超出容量时，新请求直接走降级路径，而非阻塞等待
+// 用容量为 MaxConcurrentRoutes 的有界 Channel（workerSem）当信号量，限制同时进行的路由搜索数：
+//   - 拿不到信号量的新请求直接走降级路径，而非排队等待
+//   - 候选路径的评估交给固定大小的 Worker Pool，队列满时在当前协程里计算
 
 // RouterConfig 路由引擎配置
 type RouterConfig struct {
@@ -160,9 +160,7 @@ func (r *Router) FindBestRoute(
 	default:
 		// 信号量已满，所有 Worker 都在忙
 		// 直接走降级路径，避免请求堆积导致系统雪崩
-		log.Printf("[Router] ⚠️ Worker Pool 已满（%d/%d），启用降级路由",
-			r.config.MaxConcurrentRoutes, r.config.MaxConcurrentRoutes)
-		return r.degradedRoute(tokenIn, tokenOut, amountIn, "worker_pool_full")
+		return r.degradedRoute(ctx, tokenIn, tokenOut, amountIn, "worker_pool_full")
 	}
 
 	// === Level 1：带超时的多跳搜索 ===
@@ -178,20 +176,21 @@ func (r *Router) FindBestRoute(
 	metrics.RouterLatency.ObserveDuration(start)
 
 	if err != nil || route == nil {
-		if routeCtx.Err() == context.DeadlineExceeded {
-			log.Printf("[Router] ⏰ 路由搜索超时（%v），降级到直连路径", r.config.RouteTimeout)
-			r.statsMu.Lock()
-			r.stats.TimeoutCount++
-			r.statsMu.Unlock()
+		if routeCtx.Err() != context.DeadlineExceeded {
+			// 搜索正常跑完但没有可成交的路径：直连池也在候选里，降级不会有不同的结果
+			return nil, err
 		}
+		r.statsMu.Lock()
+		r.stats.TimeoutCount++
+		r.statsMu.Unlock()
 		// === Level 2：降级路径 ===
-		return r.degradedRoute(tokenIn, tokenOut, amountIn, "search_failed")
+		return r.degradedRoute(ctx, tokenIn, tokenOut, amountIn, "search_timeout")
 	}
 
 	// === Gas 预估与警告 ===
 	if route.TicksCrossed > r.config.MaxTicksCrossed {
-		log.Printf("[Router] ⚠️ 高 Gas 警告：预估穿越 %d 个 tick（阈值 %d），建议拆分订单",
-			route.TicksCrossed, r.config.MaxTicksCrossed)
+		logging.L(ctx).Warn("路由穿越的 tick 较多，gas 偏高，建议拆分订单",
+			"ticks_crossed", route.TicksCrossed, "threshold", r.config.MaxTicksCrossed)
 	}
 
 	return route, nil
@@ -330,6 +329,7 @@ func evaluatePath(c candidate, tokenIn string, amountIn *big.Int) *Route {
 //   - 不做多跳搜索
 //   - 牺牲价格最优性，保证系统可用性
 func (r *Router) degradedRoute(
+	ctx context.Context,
 	tokenIn, tokenOut string,
 	amountIn *big.Int,
 	reason string,
@@ -339,7 +339,7 @@ func (r *Router) degradedRoute(
 	r.statsMu.Unlock()
 	metrics.RouterDegradedTotal.Inc()
 
-	log.Printf("[Router] 🔄 降级路由（原因: %s）：%s -> %s", reason, tokenIn, tokenOut)
+	logging.L(ctx).Warn("路由降级到直连池", "reason", reason, "token_in", tokenIn, "token_out", tokenOut)
 
 	var best *Route
 	for _, c := range enumeratePaths(r.stateManager.GetAllPools(), tokenIn, tokenOut, 1) {

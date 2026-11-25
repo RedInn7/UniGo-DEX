@@ -45,6 +45,11 @@ func isRevert(err error) bool {
 	return errors.As(err, &rpcErr)
 }
 
+// IsRejection 错误是否来自节点对请求的明确拒绝（交易无效、合约 revert 等），而不是节点不可达
+func IsRejection(err error) bool {
+	return isRevert(err)
+}
+
 // ChainID 返回链 ID
 func (c *Client) ChainID(ctx context.Context) (*big.Int, error) {
 	return call(c, func() (*big.Int, error) { return c.eth.ChainID(ctx) })

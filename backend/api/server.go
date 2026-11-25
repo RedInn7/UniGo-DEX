@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -33,7 +33,6 @@ import (
 //   GET  /api/v1/quote         — 获取交易报价
 //   POST /api/v1/swap          — 提交交易（含 EIP-712 签名验证）
 //   GET  /api/v1/pools         — 获取所有池子信息
-//   GET  /api/v1/pool/:address — 获取单个池子详情
 //   GET  /api/v1/status        — 系统状态（索引器、路由器、保护模式）
 //   GET  /api/v1/tx/{hash}     — 交易状态（pending / pending_confirmation / confirmed / reverted）
 //   GET  /api/v1/klines        — K 线（pool, interval, limit）
@@ -48,7 +47,7 @@ import (
 //
 // 架构特点：
 //   - 标准库 net/http（无外部依赖）
-//   - 中间件链：CORS → Logging → RateLimit → ConcurrencyLimit → Handler
+//   - 中间件链：CORS → Trace → Metrics → Logging → RateLimit → ConcurrencyLimit → Handler
 //   - 所有响应使用 JSON 格式
 //   - 错误统一通过 ErrorResponse 返回
 
@@ -162,7 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /metrics", metrics.DefaultRegistry.Handler())
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// 构建中间件链：CORS → Logging → RateLimit → ConcurrencyLimit → Handler
+	// 构建中间件链：CORS → Trace → Metrics → Logging → RateLimit → ConcurrencyLimit → Handler
 	// 两个限制都可以用 0 关闭（压测吞吐上限、或由前置网关负责限流时使用）
 	var handler http.Handler = mux
 	if s.config.MaxConcurrent > 0 {
@@ -179,7 +178,7 @@ func (s *Server) Handler() http.Handler {
 	if !s.config.DisableAccessLog {
 		handler = LoggingMiddleware(handler)
 	}
-	return CORSMiddleware(handler)
+	return CORSMiddleware(TraceMiddleware(MetricsMiddleware(handler)))
 }
 
 // Start 启动 HTTP 服务器
@@ -191,7 +190,7 @@ func (s *Server) Start() error {
 		WriteTimeout: s.config.WriteTimeout,
 	}
 
-	log.Printf("[API] 服务器启动在 :%d", s.config.Port)
+	slog.Info("API 服务器启动", "port", s.config.Port)
 	return s.httpServer.ListenAndServe()
 }
 
@@ -246,7 +245,8 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 
 	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "route search failed: "+err.Error())
+		// 找不到可成交的路径是请求本身的问题（币对不存在、流动性不足），不是服务器故障
+		writeError(w, http.StatusNotFound, "no route: "+err.Error())
 		return
 	}
 
@@ -345,7 +345,7 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	// 没有报价就无法评估价格冲击，不放行
 	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "route search failed: "+err.Error())
+		writeError(w, http.StatusNotFound, "no route: "+err.Error())
 		return
 	}
 
@@ -397,7 +397,12 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 		}
 		txHash, err := s.chain.SendRawTransaction(r.Context(), req.RawTx)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "broadcast failed: "+err.Error())
+			// 节点明确拒绝这笔交易（nonce 不对、余额不足等）是客户端的问题；连不上节点才是网关错误
+			if chain.IsRejection(err) {
+				writeError(w, http.StatusBadRequest, "transaction rejected by node: "+err.Error())
+			} else {
+				writeError(w, http.StatusBadGateway, "broadcast failed: "+err.Error())
+			}
 			return
 		}
 		resp.TxHash = txHash
@@ -526,6 +531,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		RouterDegradedRequests: routerStats.DegradedRequests,
 		RouterAvgLatencyMs:     routerStats.AvgLatencyMs,
 		CacheEnabled:           true,
+		ProtectedPairs:         s.oracle.ProtectedPairs(),
 	}
 
 	writeJSON(w, http.StatusOK, status)

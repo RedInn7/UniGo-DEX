@@ -76,7 +76,7 @@ func TestLimitsCanBeDisabled(t *testing.T) {
 			t.Fatalf("request %d: %d", i, code)
 		}
 	}
-	limited := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP = 5 })
+	limited := newTestServerWith(func(c *ServerConfig) { c.RateLimitPerIP, c.RateLimitBurst = 5, 5 })
 	rejected := 0
 	for i := 0; i < 50; i++ {
 		if limited.do(t, "GET", "/health", "", nil) == http.StatusTooManyRequests {

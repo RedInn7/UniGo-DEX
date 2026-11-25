@@ -192,7 +192,7 @@ func (g *Guard) RecommendSlippage(pools []string, requested float64, now time.Ti
 		if g.recentlyAttacked(pool, now) {
 			slippage = min(slippage, g.cfg.TightSlippage)
 			return slippage, fmt.Sprintf(
-				"⚠️ 池子 %s 近期检测到三明治攻击，推荐滑点已收紧到 %.2f%%，建议拆分订单或使用私有交易通道。",
+				"池子 %s 近期检测到三明治攻击，推荐滑点已收紧到 %.2f%%，建议拆分订单或使用私有交易通道。",
 				pool, slippage*100)
 		}
 	}
