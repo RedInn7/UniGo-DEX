@@ -25,6 +25,8 @@ var (
 	flashArbitrageJSON string
 	//go:embed AggregatorV3Interface.json
 	aggregatorJSON string
+	//go:embed IERC20.json
+	erc20JSON string
 
 	Pool           = mustParse(poolJSON)
 	Factory        = mustParse(factoryJSON)
@@ -32,6 +34,7 @@ var (
 	Quoter         = mustParse(quoterJSON)
 	FlashArbitrage = mustParse(flashArbitrageJSON)
 	Aggregator     = mustParse(aggregatorJSON) // Chainlink AggregatorV3Interface
+	ERC20          = mustParse(erc20JSON)      // 标准 ERC20 接口
 )
 
 func mustParse(raw string) abi.ABI {

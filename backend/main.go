@@ -123,6 +123,9 @@ func main() {
 	arbConfig.FlashArbAddress = strings.ToLower(os.Getenv("FLASH_ARB_ADDRESS"))
 	arbConfig.WETH = strings.ToLower(os.Getenv("WETH_ADDRESS"))
 	scanner := arb.NewScanner(arbConfig, stateManager, gasEstimator)
+	if chainClient != nil {
+		scanner.Balances = chainClient // 确认有利可图后读一次放贷池余额
+	}
 
 	// 实时推送：各模块在索引协程里产生的数据经 Hub 扇出给 SSE 客户端（Broadcast 不阻塞）
 	hub := ws.NewHub()

@@ -26,6 +26,7 @@ var contracts = map[string]string{
 	"UniGoQuoter":           "UniGoQuoter.sol",
 	"FlashArbitrage":        "FlashArbitrage.sol",
 	"AggregatorV3Interface": filepath.Join("test", "AggregatorV3Interface.sol"),
+	"IERC20":                filepath.Join("..", "@openzeppelin", "contracts", "token", "ERC20", "IERC20.sol"),
 }
 
 func main() {

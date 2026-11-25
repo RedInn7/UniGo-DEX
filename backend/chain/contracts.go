@@ -367,3 +367,14 @@ func (c *Client) ChainlinkLatestRound(ctx context.Context, feed string) (*Chainl
 		BlockTime:       uint64(block.Timestamp.Unix()),
 	}, nil
 }
+
+// ===== ERC20 =====
+
+// TokenBalance 读取 holder 持有的 token 余额（ERC20 balanceOf）
+func (c *Client) TokenBalance(ctx context.Context, token, holder string) (*big.Int, error) {
+	out, err := c.callContract(ctx, token, &contractabi.ERC20, "balanceOf", common.HexToAddress(holder))
+	if err != nil {
+		return nil, err
+	}
+	return out[0].(*big.Int), nil
+}

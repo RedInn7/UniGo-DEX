@@ -220,6 +220,7 @@ func (w *world) startBackend(t *testing.T, ctx context.Context) {
 	arbConfig.FlashArbAddress = lower(w.flashArb)
 	arbConfig.WETH = lower(w.tokenA) // 把 A 当作 WETH，gas 成本可以折算成 A 或 B
 	scanner := arb.NewScanner(arbConfig, w.state, gasEstimator)
+	scanner.Balances = client
 
 	hub := ws.NewHub()
 	go hub.Run(ctx)

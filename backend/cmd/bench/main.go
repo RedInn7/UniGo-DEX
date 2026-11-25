@@ -180,7 +180,9 @@ func newIndexer(client *chain.Client) *indexer.Indexer {
 	idx.Subscribe(oracle.NewOracle(oracle.DefaultOracleConfig()).PoolPriceFeed(state))
 	idx.Subscribe(kline.NewAggregator(kline.DefaultConfig()))
 	idx.Subscribe(mev.NewGuard(mev.DefaultConfig()))
-	idx.Subscribe(arb.NewScanner(arb.DefaultConfig(), state, gas.NewEstimator(gas.DefaultConfig(), nil)))
+	scanner := arb.NewScanner(arb.DefaultConfig(), state, gas.NewEstimator(gas.DefaultConfig(), nil))
+	scanner.Balances = client
+	idx.Subscribe(scanner)
 	return idx
 }
 

@@ -1,6 +1,7 @@
 package arb
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -226,5 +227,65 @@ func TestOpportunityLifecycle(t *testing.T) {
 	s3.OnSwap(&indexer.SwapEvent{PoolAddress: poolHigh})
 	if len(s3.Opportunities()) != 1 {
 		t.Fatalf("got %d opportunities, want 1 (capped)", len(s3.Opportunities()))
+	}
+}
+
+// fakeBalances 各放贷池持有的借入 token 余额；没列出的池子余额为 0
+type fakeBalances map[string]*big.Int
+
+func (f fakeBalances) TokenBalance(_ context.Context, _, holder string) (*big.Int, error) {
+	if balance, ok := f[holder]; ok {
+		return balance, nil
+	}
+	return new(big.Int), nil
+}
+
+// 放贷池必须真的借得出最优借入量：余额不够的跳过，换下一个；都不够就不算机会
+func TestLenderMustHoldEnoughBalance(t *testing.T) {
+	const poolLendA2 = "0x0000000000000000000000000000000000001005" // 另一个能借出 A 的池子，费率 1%，流动性较小
+	huge := new(big.Int).Lsh(big.NewInt(1), 120)
+
+	borrowA := func(s *Scanner) (Opportunity, bool) {
+		s.OnSwap(&indexer.SwapEvent{PoolAddress: poolHigh})
+		for _, opp := range s.Opportunities() {
+			if opp.BorrowToken == tokenA {
+				return opp, true
+			}
+		}
+		return Opportunity{}, false
+	}
+
+	// 首选放贷池（流动性最大的）余额充足
+	s, state := newWorld(200, DefaultConfig())
+	addPool(state, poolLendA2, tokenA, "0x00000000000000000000000000000000000000dd", 10000, 200, 0)
+	half, _ := new(big.Int).SetString("500000000000000000000000", 10)
+	second, _ := state.GetPool(poolLendA2)
+	second.ApplyBurn(&indexer.BurnEvent{TickLower: -6000, TickUpper: 6000, Amount: half})
+	s.Balances = fakeBalances{poolLendA: huge, poolLendA2: huge}
+	first, ok := borrowA(s)
+	if !ok || first.Lender != poolLendA {
+		t.Fatalf("should borrow from the deepest lender: %+v", first)
+	}
+
+	// 首选放贷池余额不足：换成第二个；它的闪电贷费率更高，最优借入量和利润都更小
+	s.Balances = fakeBalances{poolLendA: big.NewInt(1), poolLendA2: huge}
+	fallback, ok := borrowA(s)
+	if !ok || fallback.Lender != poolLendA2 {
+		t.Fatalf("should fall back to the second lender: %+v", fallback)
+	}
+	if bigInt(fallback.GrossProfit).Cmp(bigInt(first.GrossProfit)) >= 0 || bigInt(fallback.Amount).Cmp(bigInt(first.Amount)) >= 0 {
+		t.Fatalf("a 1%% flash fee should shrink amount and profit: %s/%s vs %s/%s",
+			fallback.Amount, fallback.GrossProfit, first.Amount, first.GrossProfit)
+	}
+
+	// 余额恰好等于借入量可以借；少 1 就不行
+	exact := bigInt(first.Amount)
+	s.Balances = fakeBalances{poolLendA: exact}
+	if opp, ok := borrowA(s); !ok || opp.Lender != poolLendA {
+		t.Fatalf("balance == amount should be enough: %+v", opp)
+	}
+	s.Balances = fakeBalances{poolLendA: new(big.Int).Sub(exact, big.NewInt(1))}
+	if opp, ok := borrowA(s); ok {
+		t.Fatalf("no lender can cover the amount, there should be no opportunity: %+v", opp)
 	}
 }

@@ -78,6 +78,11 @@ type Opportunity struct {
 	Timestamp   uint64 `json:"timestamp"`
 }
 
+// BalanceReader 读取 ERC20 余额（chain.Client 实现了它）
+type BalanceReader interface {
+	TokenBalance(ctx context.Context, token, holder string) (*big.Int, error)
+}
+
 // Scanner 套利机会扫描器，实现 indexer.SwapListener
 type Scanner struct {
 	cfg   Config
@@ -86,6 +91,10 @@ type Scanner struct {
 
 	mu            sync.RWMutex
 	opportunities map[string]Opportunity // key: 两个池子（地址升序）+ 借入 token
+
+	// Balances 读取放贷池的 token 余额，确认它借得出最优借入量；nil 表示不检查（没有接节点时）。
+	// 必须在索引器启动前设置。
+	Balances BalanceReader
 
 	// OnOpportunity 每发现一个机会后回调（实时推送用）。
 	// 在索引协程里同步调用，必须在索引器启动前设置，且不能阻塞。
@@ -192,21 +201,28 @@ func (s *Scanner) evaluate(pools []indexer.PoolSnapshot, a, b *indexer.PoolSnaps
 		sell, buy = low, high
 	}
 
-	lender := pickLender(pools, borrow, sell.Address, buy.Address)
-	if lender == nil {
-		return Opportunity{}, false
-	}
-
 	// 快速排除：借入量趋近于 0 时的边际利润都不为正，就不必搜索了。
 	// 每借 1 个单位：卖出再买回得到 ratio × (1-卖出池费率) × (1-买入池费率)，要还 1 + 闪电贷费率
 	ratio := umath.SqrtPriceX96ToPrice(high.SqrtPriceX96) / umath.SqrtPriceX96ToPrice(low.SqrtPriceX96)
 	keep := (1 - float64(sell.Fee)/1e6) * (1 - float64(buy.Fee)/1e6)
-	if ratio*keep <= 1+float64(lender.Fee)/1e6 {
-		return Opportunity{}, false
-	}
 
-	amount, gross := OptimalAmount(*sell, *buy, borrow, lender.Fee)
-	if amount == nil || gross.Sign() <= 0 {
+	// 依次尝试各个放贷池：闪电贷费率不同，最优借入量和利润也不同；余额不够借的跳过
+	var (
+		lender        *indexer.PoolSnapshot
+		amount, gross *big.Int
+	)
+	for _, candidate := range lenderCandidates(pools, borrow, sell.Address, buy.Address) {
+		if ratio*keep <= 1+float64(candidate.Fee)/1e6 {
+			continue
+		}
+		a, g := OptimalAmount(*sell, *buy, borrow, candidate.Fee)
+		if a == nil || g.Sign() <= 0 || !s.canLend(candidate.Address, borrow, a) {
+			continue
+		}
+		lender, amount, gross = candidate, a, g
+		break
+	}
+	if lender == nil {
 		return Opportunity{}, false
 	}
 
@@ -245,12 +261,9 @@ func (s *Scanner) evaluate(pools []indexer.PoolSnapshot, a, b *indexer.PoolSnaps
 	}, true
 }
 
-// pickLender 选放贷池：含有借入 token、不是卖出池也不是买入池，取活跃流动性最大的
-//
-// 已知上限：链下没有跟踪池子的 token 余额，放贷池余额不足时链上会 revert；
-// 需要时改成按 Mint / Burn / Swap / Collect 事件累计余额后再筛选
-func pickLender(pools []indexer.PoolSnapshot, borrow, sellPool, buyPool string) *indexer.PoolSnapshot {
-	var best *indexer.PoolSnapshot
+// lenderCandidates 可以放贷的池子：含有借入 token、不是卖出池也不是买入池，按活跃流动性从大到小
+func lenderCandidates(pools []indexer.PoolSnapshot, borrow, sellPool, buyPool string) []*indexer.PoolSnapshot {
+	var candidates []*indexer.PoolSnapshot
 	for i := range pools {
 		p := &pools[i]
 		if p.Address == sellPool || p.Address == buyPool || (p.Token0 != borrow && p.Token1 != borrow) {
@@ -259,11 +272,26 @@ func pickLender(pools []indexer.PoolSnapshot, borrow, sellPool, buyPool string) 
 		if p.SqrtPriceX96.Sign() == 0 || p.Liquidity.Sign() == 0 {
 			continue
 		}
-		if best == nil || p.Liquidity.Cmp(best.Liquidity) > 0 {
-			best = p
-		}
+		candidates = append(candidates, p)
 	}
-	return best
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Liquidity.Cmp(candidates[j].Liquidity) > 0 })
+	return candidates
+}
+
+// canLend 放贷池手里的借入 token 是否够借
+//
+// 闪电贷借的是池子合约实际持有的 token，这个余额不在事件里，所以在确认有利可图之后读一次链上余额。
+// 没有接节点（Balances 为 nil）时不做这一步检查。
+func (s *Scanner) canLend(lender, token string, amount *big.Int) bool {
+	if s.Balances == nil {
+		return true
+	}
+	balance, err := s.Balances.TokenBalance(context.Background(), token, lender)
+	if err != nil {
+		slog.Warn("读取放贷池余额失败，跳过该放贷池", "lender", lender, "err", err)
+		return false
+	}
+	return balance.Cmp(amount) >= 0
 }
 
 // Profit 借入 amount 个 borrow、在 sell 卖出再在 buy 买回、还本付息后的利润
