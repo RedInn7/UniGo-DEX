@@ -144,11 +144,13 @@ func (p *Pool) SubmitWait(ctx context.Context, task Task) bool {
 //
 // 返回一个 channel，结果通过 channel 传递
 // 用于需要等待返回值的场景
+//
+// 队列已满、任务被拒绝时在调用方协程里直接执行，否则等结果的一方会永远收不到值。
 func SubmitAndWaitResult[T any](p *Pool, fn func() T) <-chan T {
 	ch := make(chan T, 1)
-	p.Submit(func() {
+	if !p.Submit(func() { ch <- fn() }) {
 		ch <- fn()
-	})
+	}
 	return ch
 }
 

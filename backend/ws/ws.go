@@ -3,13 +3,17 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"unigo-dex/metrics"
 )
 
-// ws.go — WebSocket 实时价格推送
+// ws.go — 实时行情推送（成交 / K 线 / MEV 告警 / 套利机会）
 //
 // === 为什么需要 WebSocket？ ===
 //
@@ -36,8 +40,7 @@ import (
 //        ↓               ↓
 //   ┌────────────────────────────┐
 //   │         Hub               │
-//   │  clients map[*Client]bool │
-//   │  broadcast chan []byte    │
+//   │  clients（每个带有界队列）  │
 //   └────────────┬──────────────┘
 //                │ 价格变动事件
 //   ┌────────────▼──────────────┐
@@ -46,181 +49,157 @@ import (
 //
 // === 注意事项 ===
 //
-// 本实现使用标准库 HTTP 长轮询模拟 WebSocket 行为（SSE 风格），
-// 生产环境建议使用 gorilla/websocket 或 nhooyr.io/websocket。
-// 核心的 Hub 发布-订阅模式是相同的。
-
-// PriceUpdate 价格更新消息
-type PriceUpdate struct {
-	Pool         string  `json:"pool"`
-	Token0       string  `json:"token0"`
-	Token1       string  `json:"token1"`
-	Price        float64 `json:"price"`
-	Tick         int32   `json:"tick"`
-	Liquidity    string  `json:"liquidity"`
-	Timestamp    int64   `json:"timestamp"`
-	BlockNumber  uint64  `json:"block_number"`
-}
-
-// Client 代表一个 WebSocket 客户端
-type Client struct {
-	// send 消息发送通道（有界，防止慢客户端阻塞 Hub）
-	send chan []byte
-
-	// subscriptions 订阅的交易对
-	subscriptions map[string]bool
-
-	mu sync.RWMutex
-}
-
-// Hub 管理所有 WebSocket 连接的中心
+// 本实现用标准库的 SSE（Server-Sent Events）做单向推送，浏览器用 EventSource 即可订阅。
+// 核心的 Hub 发布-订阅模式与 WebSocket 相同。
 //
-// Hub 是经典的发布-订阅模式实现：
-//   - 维护活跃客户端集合
-//   - 接收广播消息，扇出到所有订阅了相关交易对的客户端
-//   - 处理客户端的连接和断开
+// === 慢客户端不能拖住索引器 ===
+//
+// Broadcast 在索引协程里被同步调用，所以它绝不阻塞：
+//   - 每个客户端有一个有界发送队列，扇出时用非阻塞写
+//   - 队列满了说明客户端消费不过来，直接断开它（客户端重连后从最新数据继续），
+//     而不是让它的积压反过来卡住所有人
+
+// 每个客户端的发送队列长度，以及同时在线的客户端上限
+const (
+	clientQueueSize = 256
+	maxClients      = 1024
+)
+
+// message 一条待推送的消息
+type message struct {
+	kind string // 消息类型：trade / kline / mev_alert / arbitrage
+	data []byte // JSON
+}
+
+// client 一个订阅者
+type client struct {
+	send  chan message
+	kinds map[string]bool // 只订阅这些类型；nil 表示全部
+}
+
+// Hub 管理所有订阅者并扇出消息
 type Hub struct {
-	// clients 所有活跃客户端
-	clients map[*Client]bool
-
-	// broadcast 广播通道
-	broadcast chan []byte
-
-	// register 客户端注册通道
-	register chan *Client
-
-	// unregister 客户端注销通道
-	unregister chan *Client
-
-	mu sync.RWMutex
+	mu      sync.Mutex
+	clients map[*client]struct{}
+	closed  bool
 }
 
 // NewHub 创建 Hub
 func NewHub() *Hub {
-	return &Hub{
-		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte, 256),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+	return &Hub{clients: make(map[*client]struct{})}
+}
+
+// Run 阻塞到 ctx 结束，然后断开所有客户端并拒绝新的订阅
+func (h *Hub) Run(ctx context.Context) {
+	<-ctx.Done()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for c := range h.clients {
+		h.drop(c)
 	}
 }
 
-// Run 启动 Hub 事件循环
-//
-// 单一协程处理所有注册/注销/广播，避免并发竞争
-// 这是 Go 并发编程中经典的 "select loop" 模式
-func (h *Hub) Run(ctx context.Context) {
-	for {
+// Broadcast 向所有订阅了 kind 的客户端推送一条消息，永不阻塞
+func (h *Hub) Broadcast(kind string, payload interface{}) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		slog.Warn("推送消息序列化失败", "kind", kind, "err", err)
+		return
+	}
+	msg := message{kind: kind, data: data}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.kinds != nil && !c.kinds[kind] {
+			continue
+		}
 		select {
-		case <-ctx.Done():
-			// 关闭所有客户端
-			h.mu.Lock()
-			for client := range h.clients {
-				close(client.send)
-				delete(h.clients, client)
-			}
-			h.mu.Unlock()
-			return
-
-		case client := <-h.register:
-			h.mu.Lock()
-			h.clients[client] = true
-			h.mu.Unlock()
-			slog.Info("WebSocket 客户端连接",
-				"total_clients", len(h.clients))
-
-		case client := <-h.unregister:
-			h.mu.Lock()
-			if _, ok := h.clients[client]; ok {
-				close(client.send)
-				delete(h.clients, client)
-			}
-			h.mu.Unlock()
-			slog.Info("WebSocket 客户端断开",
-				"total_clients", len(h.clients))
-
-		case message := <-h.broadcast:
-			h.mu.RLock()
-			for client := range h.clients {
-				select {
-				case client.send <- message:
-					// 发送成功
-				default:
-					// 客户端 send buffer 满了（慢客户端）
-					// 关闭连接，避免 Hub 被阻塞
-					close(client.send)
-					delete(h.clients, client)
-					slog.Warn("关闭慢速 WebSocket 客户端")
-				}
-			}
-			h.mu.RUnlock()
+		case c.send <- msg:
+		default:
+			// 队列已满：断开慢客户端
+			h.drop(c)
+			metrics.StreamDroppedClients.Inc()
+			slog.Warn("推送队列已满，断开慢客户端")
 		}
 	}
 }
 
-// BroadcastPriceUpdate 广播价格更新
-//
-// 由 Indexer 在处理 Swap 事件后调用
-func (h *Hub) BroadcastPriceUpdate(update *PriceUpdate) {
-	data, err := json.Marshal(update)
-	if err != nil {
-		return
+// drop 断开一个客户端（调用方持有锁）
+func (h *Hub) drop(c *client) {
+	if _, ok := h.clients[c]; ok {
+		delete(h.clients, c)
+		close(c.send)
+		metrics.StreamClients.Set(int64(len(h.clients)))
 	}
+}
 
-	select {
-	case h.broadcast <- data:
-	default:
-		// broadcast channel 满了，丢弃（不阻塞 Indexer）
-		slog.Warn("WebSocket 广播通道已满，丢弃消息")
+// subscribe 注册一个订阅者；Hub 已关闭或客户端数达到上限时返回 nil
+func (h *Hub) subscribe(kinds map[string]bool) *client {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || len(h.clients) >= maxClients {
+		return nil
 	}
+	c := &client{send: make(chan message, clientQueueSize), kinds: kinds}
+	h.clients[c] = struct{}{}
+	metrics.StreamClients.Set(int64(len(h.clients)))
+	return c
+}
+
+func (h *Hub) unsubscribe(c *client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.drop(c)
 }
 
 // ClientCount 当前客户端数量
 func (h *Hub) ClientCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return len(h.clients)
 }
 
-// SSEHandler 基于 Server-Sent Events (SSE) 的实时推送
+// SSEHandler 返回 SSE 订阅端点
 //
-// SSE 是 WebSocket 的轻量替代：
-//   - 单向：服务端 → 客户端（足够用于价格推送）
-//   - 基于 HTTP：无需协议升级，穿透性更好
-//   - 自动重连：浏览器原生支持断线重连
-//   - 标准库即可实现，无外部依赖
+// 可选参数 types 用逗号分隔要订阅的消息类型，如 ?types=trade,kline；不传则订阅全部。
+// 每条消息的格式：
 //
-// 客户端使用：
-//   const es = new EventSource("/ws/prices");
-//   es.onmessage = (e) => { console.log(JSON.parse(e.data)); };
+//	event: trade
+//	data: {...}
 func (h *Hub) SSEHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 检查是否支持 Flusher（SSE 必需）
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
 
-		// 设置 SSE 响应头
+		var kinds map[string]bool
+		if v := r.URL.Query().Get("types"); v != "" {
+			kinds = make(map[string]bool)
+			for _, kind := range strings.Split(v, ",") {
+				kinds[strings.TrimSpace(kind)] = true
+			}
+		}
+		c := h.subscribe(kinds)
+		if c == nil {
+			http.Error(w, "too many stream clients", http.StatusServiceUnavailable)
+			return
+		}
+		defer h.unsubscribe(c)
+
+		// 长连接不受服务器写超时限制
+		http.NewResponseController(w).SetWriteDeadline(time.Time{})
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
 
-		// 创建客户端
-		client := &Client{
-			send:          make(chan []byte, 64),
-			subscriptions: make(map[string]bool),
-		}
-
-		// 注册到 Hub
-		h.register <- client
-
-		// 请求结束时注销
-		defer func() { h.unregister <- client }()
-
-		// 心跳：每 15 秒发送空注释，保持连接活跃
+		// 心跳保活（每 15 秒）
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
 
@@ -229,19 +208,19 @@ func (h *Hub) SSEHandler() http.Handler {
 			case <-r.Context().Done():
 				return
 
-			case msg, ok := <-client.send:
+			case msg, ok := <-c.send:
 				if !ok {
+					return // 被 Hub 断开
+				}
+				if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.kind, msg.data); err != nil {
 					return
 				}
-				// SSE 格式：data: {json}\n\n
-				w.Write([]byte("data: "))
-				w.Write(msg)
-				w.Write([]byte("\n\n"))
 				flusher.Flush()
 
 			case <-heartbeat.C:
-				// SSE 心跳（注释行）
-				w.Write([]byte(": heartbeat\n\n"))
+				if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
+					return
+				}
 				flusher.Flush()
 			}
 		}

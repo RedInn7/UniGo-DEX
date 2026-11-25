@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+
+	umath "unigo-dex/math"
 )
 
 // pool_state.go — 链下池子状态管理
@@ -62,6 +64,16 @@ func NewPoolState(address, token0, token1 string, fee uint32, tickSpacing int32)
 		Liquidity:    big.NewInt(0),
 		Ticks:        make(map[int32]*TickInfo),
 	}
+}
+
+// ApplyInitialize 应用 Initialize 事件，设定初始价格和 tick
+func (p *PoolState) ApplyInitialize(event *InitializeEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.SqrtPriceX96 = new(big.Int).Set(event.SqrtPriceX96)
+	p.Tick = event.Tick
+	p.LastBlockNumber = event.BlockNumber
 }
 
 // ApplyMint 应用 Mint 事件，更新池子状态
@@ -185,23 +197,19 @@ func (p *PoolState) GetCurrentPrice() float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.SqrtPriceX96.Sign() == 0 {
-		return 0
-	}
-
-	// price = (sqrtPriceX96 / 2^96)^2
-	sqrtPriceFloat := new(big.Float).SetInt(p.SqrtPriceX96)
-	q96Float := new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(1), 96))
-	sqrtPrice := new(big.Float).Quo(sqrtPriceFloat, q96Float)
-	price := new(big.Float).Mul(sqrtPrice, sqrtPrice)
-	result, _ := price.Float64()
-	return result
+	return umath.SqrtPriceX96ToPrice(p.SqrtPriceX96)
 }
 
 // Snapshot 获取池子状态的快照（用于并发安全的路由计算）
 func (p *PoolState) Snapshot() PoolSnapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
+	// LiquidityNet 每次更新都会换成新的 big.Int，这里直接共享指针是安全的
+	ticks := make([]TickLiquidity, len(p.InitializedTicks))
+	for i, tick := range p.InitializedTicks {
+		ticks[i] = TickLiquidity{Tick: tick, LiquidityNet: p.Ticks[tick].LiquidityNet}
+	}
 
 	return PoolSnapshot{
 		Address:      p.Address,
@@ -212,6 +220,7 @@ func (p *PoolState) Snapshot() PoolSnapshot {
 		SqrtPriceX96: new(big.Int).Set(p.SqrtPriceX96),
 		Tick:         p.Tick,
 		Liquidity:    new(big.Int).Set(p.Liquidity),
+		Ticks:        ticks,
 	}
 }
 
@@ -225,6 +234,14 @@ type PoolSnapshot struct {
 	SqrtPriceX96 *big.Int
 	Tick         int32
 	Liquidity    *big.Int
+	// Ticks 已初始化的 tick 及其净流动性，按 tick 升序；链下逐 tick 模拟 swap 用
+	Ticks []TickLiquidity
+}
+
+// TickLiquidity 一个已初始化 tick 的净流动性
+type TickLiquidity struct {
+	Tick         int32
+	LiquidityNet *big.Int // 价格从左向右穿过该 tick 时活跃流动性的变化量
 }
 
 // String 实现 Stringer 接口，方便日志输出
@@ -261,6 +278,13 @@ func (m *PoolStateManager) AddPool(pool *PoolState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pools[pool.Address] = pool
+}
+
+// RemovePool 移除池子（创建它的区块被 Reorg 回滚时使用）
+func (m *PoolStateManager) RemovePool(address string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pools, address)
 }
 
 // GetAllPools 获取所有池子的快照

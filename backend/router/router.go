@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"runtime"
 	"sync"
 	"time"
 
 	"unigo-dex/indexer"
+	"unigo-dex/metrics"
+	"unigo-dex/workerpool"
 )
 
 // router.go — Smart Order Router（智能路由引擎）
@@ -24,7 +27,7 @@ import (
 //   Level 1（正常模式）：BFS 搜索多跳最优路径
 //     - 最大跳数：3
 //     - 超时：200ms
-//     - 并发 Worker Pool 限制
+//     - 先枚举候选路径，再用 Worker Pool 并发逐 tick 模拟每条路径的产出
 //
 //   Level 2（降级模式）：直连路径 fallback
 //     - 当 Level 1 超时或失败
@@ -36,7 +39,6 @@ import (
 // 使用有界 Channel 限制请求队列长度，避免请求无限堆积：
 //   - routeRequestChan 容量 = maxConcurrentRoutes
 //   - 超出容量时，新请求直接走降级路径，而非阻塞等待
-//   - 配合 sync.Pool 复用搜索过程中的临时对象，降低 GC 压力
 
 // RouterConfig 路由引擎配置
 type RouterConfig struct {
@@ -62,14 +64,32 @@ func DefaultRouterConfig() RouterConfig {
 
 // Route 表示一条交易路径
 type Route struct {
-	Pools       []indexer.PoolSnapshot // 经过的池子
-	Path        []string              // token 路径，如 [WETH, USDC, DAI]
-	AmountIn    *big.Int              // 输入数量
-	AmountOut   *big.Int              // 预期输出
-	GasEstimate uint64                // 预估 Gas
-	TicksCrossed int                  // 预估穿越的 tick 数量
-	IsDegraded  bool                  // 是否为降级路径
+	Pools        []indexer.PoolSnapshot // 经过的池子
+	Path         []string               // token 路径，如 [WETH, USDC, DAI]
+	AmountIn     *big.Int               // 输入数量
+	AmountOut    *big.Int               // 预期输出（逐 tick 模拟，与链上 Quoter 一致）
+	GasEstimate  uint64                 // 预估 Gas
+	TicksCrossed int                    // 穿越的已初始化 tick 数
+	IsDegraded   bool                   // 是否为降级路径
 }
+
+// Fees 路径上每一跳的费率，用于编码 Manager 的紧凑路径
+func (r *Route) Fees() []uint32 {
+	fees := make([]uint32, len(r.Pools))
+	for i, p := range r.Pools {
+		fees[i] = p.Fee
+	}
+	return fees
+}
+
+// Gas 预估参数：每一跳的固定开销 + 每穿越一个已初始化 tick 的额外开销
+const (
+	gasPerHop       = 150000
+	gasPerTickCross = 25000
+)
+
+// maxCandidates 单次搜索最多评估的候选路径数
+const maxCandidates = 64
 
 // Router 智能路由引擎
 type Router struct {
@@ -79,11 +99,12 @@ type Router struct {
 	// 背压控制：有界 Channel 限制并发数
 	workerSem chan struct{}
 
-	// sync.Pool 复用搜索中的临时对象，降低 GC 压力
-	searchStatePool sync.Pool
+	// 候选路径的并发评估
+	evalPool *workerpool.Pool
 
 	// 统计
-	stats RouterStats
+	stats   RouterStats
+	statsMu sync.Mutex
 }
 
 // RouterStats 路由引擎统计
@@ -92,20 +113,12 @@ type RouterStats struct {
 	DegradedRequests uint64 // 降级到直连的次数
 	TimeoutCount     uint64
 	AvgLatencyMs     float64
-	mu               sync.Mutex
 }
 
-// searchState 路由搜索的临时状态（通过 sync.Pool 复用）
-type searchState struct {
-	visited map[string]bool
-	queue   []searchNode
-}
-
-type searchNode struct {
-	token   string
-	pools   []indexer.PoolSnapshot
-	path    []string
-	depth   int
+// candidate 一条候选路径
+type candidate struct {
+	pools []indexer.PoolSnapshot
+	path  []string
 }
 
 // NewRouter 创建路由引擎
@@ -114,34 +127,28 @@ func NewRouter(config RouterConfig, stateManager *indexer.PoolStateManager) *Rou
 		config:       config,
 		stateManager: stateManager,
 		workerSem:    make(chan struct{}, config.MaxConcurrentRoutes),
-		searchStatePool: sync.Pool{
-			New: func() interface{} {
-				return &searchState{
-					visited: make(map[string]bool),
-					queue:   make([]searchNode, 0, 32),
-				}
-			},
-		},
+		evalPool:     workerpool.New(workerpool.Config{WorkerCount: runtime.NumCPU(), QueueSize: 4 * maxCandidates}),
 	}
 }
 
 // FindBestRoute 查找最优交易路径
 //
 // 二级降级流程：
-//   1. 尝试获取 Worker 信号量（背压控制）
-//      - 如果信号量已满，直接走降级路径（避免请求堆积）
-//   2. 带超时的 BFS 搜索（Level 1）
-//      - 超时 200ms 后自动取消
-//   3. 如果 Level 1 失败/超时，执行 Level 2 降级
-//   4. 检查 tick 穿越数量，必要时发出高 Gas 警告
+//  1. 尝试获取 Worker 信号量（背压控制）
+//     - 如果信号量已满，直接走降级路径（避免请求堆积）
+//  2. 带超时的多跳搜索（Level 1）
+//     - 超时 200ms 后自动取消
+//  3. 如果 Level 1 失败/超时，执行 Level 2 降级
+//  4. 检查 tick 穿越数量，必要时发出高 Gas 警告
 func (r *Router) FindBestRoute(
 	ctx context.Context,
 	tokenIn, tokenOut string,
 	amountIn *big.Int,
 ) (*Route, error) {
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.TotalRequests++
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
+	metrics.RouterRequestsTotal.Inc()
 
 	start := time.Now()
 
@@ -158,23 +165,24 @@ func (r *Router) FindBestRoute(
 		return r.degradedRoute(tokenIn, tokenOut, amountIn, "worker_pool_full")
 	}
 
-	// === Level 1：带超时的 BFS 搜索 ===
+	// === Level 1：带超时的多跳搜索 ===
 	routeCtx, cancel := context.WithTimeout(ctx, r.config.RouteTimeout)
 	defer cancel()
 
 	route, err := r.searchRoutes(routeCtx, tokenIn, tokenOut, amountIn)
 
 	elapsed := time.Since(start)
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.AvgLatencyMs = (r.stats.AvgLatencyMs*float64(r.stats.TotalRequests-1) + float64(elapsed.Milliseconds())) / float64(r.stats.TotalRequests)
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
+	metrics.RouterLatency.ObserveDuration(start)
 
 	if err != nil || route == nil {
 		if routeCtx.Err() == context.DeadlineExceeded {
 			log.Printf("[Router] ⏰ 路由搜索超时（%v），降级到直连路径", r.config.RouteTimeout)
-			r.stats.mu.Lock()
+			r.statsMu.Lock()
 			r.stats.TimeoutCount++
-			r.stats.mu.Unlock()
+			r.statsMu.Unlock()
 		}
 		// === Level 2：降级路径 ===
 		return r.degradedRoute(tokenIn, tokenOut, amountIn, "search_failed")
@@ -189,116 +197,136 @@ func (r *Router) FindBestRoute(
 	return route, nil
 }
 
-// searchRoutes BFS 搜索最优路径
+// searchRoutes 搜索最优路径
 //
-// 搜索策略：
-//   1. 从 tokenIn 出发，BFS 遍历所有可达的池子
-//   2. 每一跳检查是否到达 tokenOut
-//   3. 通过 context 超时控制搜索时间
-//   4. 使用 sync.Pool 复用搜索状态，减少 GC 压力
+// 两个阶段：
+//  1. 枚举：DFS 找出 tokenIn 到 tokenOut 不超过 MaxHops 跳、不重复经过同一 token 的所有路径。
+//     同一对 token 的不同费率池算不同路径。只看图结构，很快。
+//  2. 评估：每条候选路径逐池逐 tick 模拟产出。这一步是 CPU 密集的大数运算，
+//     交给 Worker Pool 并发执行；队列满时在当前协程里直接算，不丢候选。
 func (r *Router) searchRoutes(
 	ctx context.Context,
 	tokenIn, tokenOut string,
 	amountIn *big.Int,
 ) (*Route, error) {
-	// 从 sync.Pool 获取搜索状态
-	state := r.searchStatePool.Get().(*searchState)
-	defer func() {
-		// 重置并归还到 Pool
-		for k := range state.visited {
-			delete(state.visited, k)
-		}
-		state.queue = state.queue[:0]
-		r.searchStatePool.Put(state)
-	}()
-
 	pools := r.stateManager.GetAllPools()
 	if len(pools) == 0 {
 		return nil, fmt.Errorf("no pools available")
 	}
 
-	// BFS 初始化
-	state.queue = append(state.queue, searchNode{
-		token: tokenIn,
-		path:  []string{tokenIn},
-		depth: 0,
-	})
-	state.visited[tokenIn] = true
-
-	var bestRoute *Route
-
-	for len(state.queue) > 0 {
-		// 检查超时
-		select {
-		case <-ctx.Done():
-			return bestRoute, ctx.Err()
-		default:
-		}
-
-		node := state.queue[0]
-		state.queue = state.queue[1:]
-
-		if node.depth >= r.config.MaxHops {
-			continue
-		}
-
-		// 遍历所有池子，寻找与当前 token 相关的
-		for _, pool := range pools {
-			var nextToken string
-			if pool.Token0 == node.token {
-				nextToken = pool.Token1
-			} else if pool.Token1 == node.token {
-				nextToken = pool.Token0
-			} else {
-				continue
-			}
-
-			if state.visited[nextToken] && nextToken != tokenOut {
-				continue
-			}
-
-			newPath := make([]string, len(node.path)+1)
-			copy(newPath, node.path)
-			newPath[len(node.path)] = nextToken
-
-			newPools := make([]indexer.PoolSnapshot, len(node.pools)+1)
-			copy(newPools, node.pools)
-			newPools[len(node.pools)] = pool
-
-			if nextToken == tokenOut {
-				// 找到一条路径
-				route := &Route{
-					Pools:    newPools,
-					Path:     newPath,
-					AmountIn: amountIn,
-					// 实际产出需要通过 SimulateSwap 计算
-					AmountOut:    r.estimateOutput(newPools, amountIn),
-					GasEstimate:  uint64(150000 * len(newPools)),
-					TicksCrossed: len(newPools) * 10, // 简化估算
-				}
-
-				if bestRoute == nil || route.AmountOut.Cmp(bestRoute.AmountOut) > 0 {
-					bestRoute = route
-				}
-			} else {
-				state.visited[nextToken] = true
-				state.queue = append(state.queue, searchNode{
-					token: nextToken,
-					pools: newPools,
-					path:  newPath,
-					depth: node.depth + 1,
-				})
-			}
-		}
+	candidates := enumeratePaths(pools, tokenIn, tokenOut, r.config.MaxHops)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no path from %s to %s", tokenIn, tokenOut)
 	}
 
-	return bestRoute, nil
+	routes := make([]*Route, len(candidates))
+	var wg sync.WaitGroup
+	for i, c := range candidates {
+		evaluate := func() {
+			defer wg.Done()
+			if ctx.Err() == nil {
+				routes[i] = evaluatePath(c, tokenIn, amountIn)
+			}
+		}
+		wg.Add(1)
+		if !r.evalPool.Submit(evaluate) {
+			evaluate()
+		}
+	}
+	wg.Wait()
+	metrics.WorkerPoolQueueUsed.Set(int64(r.evalPool.Stats().QueueUsed))
+
+	var best *Route
+	for _, route := range routes {
+		if route != nil && (best == nil || route.AmountOut.Cmp(best.AmountOut) > 0) {
+			best = route
+		}
+	}
+	if best == nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("no path from %s to %s has enough liquidity", tokenIn, tokenOut)
+	}
+	return best, nil
 }
 
-// degradedRoute 降级路径：直接查找直连池
+// enumeratePaths DFS 枚举候选路径，最多 maxCandidates 条
+func enumeratePaths(pools []indexer.PoolSnapshot, tokenIn, tokenOut string, maxHops int) []candidate {
+	var (
+		candidates []candidate
+		pathPools  []indexer.PoolSnapshot
+		path       = []string{tokenIn}
+		visited    = map[string]bool{tokenIn: true}
+	)
+
+	var dfs func(token string)
+	dfs = func(token string) {
+		for _, pool := range pools {
+			if len(candidates) >= maxCandidates {
+				return
+			}
+			var next string
+			switch token {
+			case pool.Token0:
+				next = pool.Token1
+			case pool.Token1:
+				next = pool.Token0
+			default:
+				continue
+			}
+			if visited[next] {
+				continue
+			}
+
+			pathPools = append(pathPools, pool)
+			path = append(path, next)
+			if next == tokenOut {
+				candidates = append(candidates, candidate{
+					pools: append([]indexer.PoolSnapshot{}, pathPools...),
+					path:  append([]string{}, path...),
+				})
+			} else if len(pathPools) < maxHops {
+				visited[next] = true
+				dfs(next)
+				visited[next] = false
+			}
+			pathPools = pathPools[:len(pathPools)-1]
+			path = path[:len(path)-1]
+		}
+	}
+	dfs(tokenIn)
+	return candidates
+}
+
+// evaluatePath 逐池模拟一条路径的产出；任何一跳流动性不足或没有价格时返回 nil
+func evaluatePath(c candidate, tokenIn string, amountIn *big.Int) *Route {
+	amount := amountIn
+	token := tokenIn
+	crossed := 0
+	for i, pool := range c.pools {
+		out, result, err := QuoteExactInputSingle(pool, token, amount)
+		if err != nil || out.Sign() <= 0 {
+			return nil
+		}
+		amount = out
+		token = c.path[i+1]
+		crossed += result.TicksCrossed
+	}
+	return &Route{
+		Pools:        c.pools,
+		Path:         c.path,
+		AmountIn:     amountIn,
+		AmountOut:    amount,
+		GasEstimate:  uint64(gasPerHop*len(c.pools) + gasPerTickCross*crossed),
+		TicksCrossed: crossed,
+	}
+}
+
+// degradedRoute 降级路径：只在直连池里选
 //
 // 当 Level 1 搜索失败时的 fallback：
-//   - 只查找 tokenIn/tokenOut 的直连池
+//   - 只查找 tokenIn/tokenOut 的直连池（可能有多个费率档），取产出最高的
 //   - 不做多跳搜索
 //   - 牺牲价格最优性，保证系统可用性
 func (r *Router) degradedRoute(
@@ -306,56 +334,56 @@ func (r *Router) degradedRoute(
 	amountIn *big.Int,
 	reason string,
 ) (*Route, error) {
-	r.stats.mu.Lock()
+	r.statsMu.Lock()
 	r.stats.DegradedRequests++
-	r.stats.mu.Unlock()
+	r.statsMu.Unlock()
+	metrics.RouterDegradedTotal.Inc()
 
 	log.Printf("[Router] 🔄 降级路由（原因: %s）：%s -> %s", reason, tokenIn, tokenOut)
 
-	pools := r.stateManager.GetAllPools()
-	for _, pool := range pools {
-		if (pool.Token0 == tokenIn && pool.Token1 == tokenOut) ||
-			(pool.Token1 == tokenIn && pool.Token0 == tokenOut) {
-			return &Route{
-				Pools:        []indexer.PoolSnapshot{pool},
-				Path:         []string{tokenIn, tokenOut},
-				AmountIn:     amountIn,
-				AmountOut:    r.estimateOutput([]indexer.PoolSnapshot{pool}, amountIn),
-				GasEstimate:  150000,
-				TicksCrossed: 10,
-				IsDegraded:   true,
-			}, nil
+	var best *Route
+	for _, c := range enumeratePaths(r.stateManager.GetAllPools(), tokenIn, tokenOut, 1) {
+		if route := evaluatePath(c, tokenIn, amountIn); route != nil && (best == nil || route.AmountOut.Cmp(best.AmountOut) > 0) {
+			best = route
 		}
 	}
-
-	return nil, fmt.Errorf("no route found for %s -> %s (even degraded)", tokenIn, tokenOut)
+	if best == nil {
+		return nil, fmt.Errorf("no route found for %s -> %s (even degraded)", tokenIn, tokenOut)
+	}
+	best.IsDegraded = true
+	return best, nil
 }
 
-// estimateOutput 估算路径的输出数量
-func (r *Router) estimateOutput(pools []indexer.PoolSnapshot, amountIn *big.Int) *big.Int {
-	if len(pools) == 0 || amountIn.Sign() == 0 {
-		return big.NewInt(0)
-	}
-
-	current := new(big.Int).Set(amountIn)
-	for _, pool := range pools {
-		if pool.Liquidity.Sign() == 0 {
-			return big.NewInt(0)
+// FindExactOutputRoute 精确输出的单跳路由：在直连池里找投入最少的那个
+//
+// 返回的 Route 中 AmountOut 是指定的输出数量，AmountIn 是需要投入的数量。
+func (r *Router) FindExactOutputRoute(tokenIn, tokenOut string, amountOut *big.Int) (*Route, error) {
+	var best *Route
+	for _, c := range enumeratePaths(r.stateManager.GetAllPools(), tokenIn, tokenOut, 1) {
+		amountIn, result, err := QuoteExactOutputSingle(c.pools[0], tokenIn, amountOut)
+		if err != nil || amountIn.Sign() <= 0 {
+			continue
 		}
-		// 简化估算：基于 x*y=k 模型近似
-		// 实际实现应该使用完整的 ComputeSwapStep 逐 tick 模拟
-		fee := big.NewInt(int64(pool.Fee))
-		million := big.NewInt(1e6)
-		afterFee := new(big.Int).Mul(current, new(big.Int).Sub(million, fee))
-		afterFee.Div(afterFee, million)
-		current = afterFee
+		if best == nil || amountIn.Cmp(best.AmountIn) < 0 {
+			best = &Route{
+				Pools:        c.pools,
+				Path:         c.path,
+				AmountIn:     amountIn,
+				AmountOut:    amountOut,
+				GasEstimate:  uint64(gasPerHop + gasPerTickCross*result.TicksCrossed),
+				TicksCrossed: result.TicksCrossed,
+			}
+		}
 	}
-	return current
+	if best == nil {
+		return nil, fmt.Errorf("no direct pool can deliver %s of %s", amountOut, tokenOut)
+	}
+	return best, nil
 }
 
 // GetStats 获取路由统计
 func (r *Router) GetStats() RouterStats {
-	r.stats.mu.Lock()
-	defer r.stats.mu.Unlock()
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
 	return r.stats
 }

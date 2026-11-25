@@ -10,6 +10,18 @@ import (
 // 索引器从区块链捕获原始日志后，解析为这些结构体，
 // 供 pool_state.go 用来重建链下状态。
 
+// InitializeEvent 对应 UniGoPool.Initialize 事件
+// 池子设定初始价格时触发（每个池子只有一次），此后链下才有价格可用
+type InitializeEvent struct {
+	PoolAddress  string
+	SqrtPriceX96 *big.Int // 初始价格
+	Tick         int32    // 初始价格对应的 tick
+	BlockNumber  uint64
+	Timestamp    uint64
+	TxHash       string
+	LogIndex     uint
+}
+
 // MintEvent 对应 UniGoPool.Mint 事件
 // 当用户添加流动性时触发
 type MintEvent struct {
@@ -22,6 +34,7 @@ type MintEvent struct {
 	Amount0     *big.Int // 存入的 token0 数量
 	Amount1     *big.Int // 存入的 token1 数量
 	BlockNumber uint64   // 区块号
+	Timestamp   uint64   // 区块时间戳（Unix 秒）
 	TxHash      string   // 交易哈希
 	LogIndex    uint     // 日志索引
 }
@@ -37,6 +50,7 @@ type BurnEvent struct {
 	Amount0     *big.Int
 	Amount1     *big.Int
 	BlockNumber uint64
+	Timestamp   uint64
 	TxHash      string
 	LogIndex    uint
 }
@@ -53,6 +67,7 @@ type SwapEvent struct {
 	Liquidity    *big.Int // swap 后的流动性
 	Tick         int32    // swap 后的 tick
 	BlockNumber  uint64
+	Timestamp    uint64
 	TxHash       string
 	LogIndex     uint
 }
@@ -67,6 +82,23 @@ type CollectEvent struct {
 	Amount0     *big.Int
 	Amount1     *big.Int
 	BlockNumber uint64
+	Timestamp   uint64
+	TxHash      string
+	LogIndex    uint
+}
+
+// FlashEvent 对应 UniGoPool.Flash 事件
+// 闪电贷完成时触发，不改变价格和流动性
+type FlashEvent struct {
+	PoolAddress string
+	Sender      string
+	Recipient   string
+	Amount0     *big.Int // 借出的 token0 数量
+	Amount1     *big.Int // 借出的 token1 数量
+	Paid0       *big.Int // 归还时多付的 token0（手续费）
+	Paid1       *big.Int // 归还时多付的 token1（手续费）
+	BlockNumber uint64
+	Timestamp   uint64
 	TxHash      string
 	LogIndex    uint
 }
@@ -79,5 +111,6 @@ type PoolCreatedEvent struct {
 	TickSpacing int32
 	Pool        string
 	BlockNumber uint64
+	Timestamp   uint64
 	TxHash      string
 }

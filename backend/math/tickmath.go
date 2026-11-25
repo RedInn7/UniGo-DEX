@@ -128,25 +128,33 @@ func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 	tickApprox := math.Log(price) / math.Log(1.0001)
 	tick := int32(math.Floor(tickApprox))
 
-	// 验证并修正：检查 tick 和 tick+1 哪个正确
-	sqrtAtTick, err := GetSqrtRatioAtTick(tick)
-	if err != nil {
-		return 0, err
-	}
-	sqrtAtTickPlus1, err := GetSqrtRatioAtTick(tick + 1)
-	if err != nil {
-		return 0, err
+	if tick < MinTick {
+		tick = MinTick
+	} else if tick >= MaxTick {
+		tick = MaxTick - 1
 	}
 
-	// tick 正确的条件：sqrtAtTick <= sqrtPriceX96 < sqrtAtTick+1
-	if sqrtAtTick.Cmp(sqrtPriceX96) <= 0 && sqrtAtTickPlus1.Cmp(sqrtPriceX96) > 0 {
+	// 浮点近似可能差一两个 tick，用精确的 GetSqrtRatioAtTick 修正到
+	// sqrtRatio(tick) <= sqrtPriceX96 < sqrtRatio(tick+1) 成立为止
+	for {
+		sqrtAtTick, err := GetSqrtRatioAtTick(tick)
+		if err != nil {
+			return 0, err
+		}
+		if sqrtAtTick.Cmp(sqrtPriceX96) > 0 {
+			tick--
+			continue
+		}
+		sqrtAtNext, err := GetSqrtRatioAtTick(tick + 1)
+		if err != nil {
+			return 0, err
+		}
+		if sqrtAtNext.Cmp(sqrtPriceX96) <= 0 {
+			tick++
+			continue
+		}
 		return tick, nil
 	}
-	// 如果不满足，尝试 tick-1 和 tick+1
-	if sqrtAtTick.Cmp(sqrtPriceX96) > 0 {
-		return tick - 1, nil
-	}
-	return tick + 1, nil
 }
 
 // TickToPrice 将 tick 转换为人类可读的价格（浮点数）
@@ -155,6 +163,19 @@ func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 // 用途：用于 API 响应和日志中展示可读价格
 func TickToPrice(tick int32) float64 {
 	return math.Pow(1.0001, float64(tick))
+}
+
+// SqrtPriceX96ToPrice 将 Q64.96 的 sqrtPriceX96 换算为价格
+//
+// price = (sqrtPriceX96 / 2^96)^2，即 1 个 token0 最小单位值多少 token1 最小单位。
+// 仅用于展示和估算，sqrtPriceX96 为空或为 0 时返回 0。
+func SqrtPriceX96ToPrice(sqrtPriceX96 *big.Int) float64 {
+	if sqrtPriceX96 == nil || sqrtPriceX96.Sign() == 0 {
+		return 0
+	}
+	sqrtPrice := new(big.Float).Quo(new(big.Float).SetInt(sqrtPriceX96), new(big.Float).SetInt(Q96))
+	price, _ := new(big.Float).Mul(sqrtPrice, sqrtPrice).Float64()
+	return price
 }
 
 // PriceToTick 将价格转换为最近的 tick

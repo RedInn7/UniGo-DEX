@@ -184,3 +184,23 @@ func BenchmarkGoroutineMemory(b *testing.B) {
 		}
 	})
 }
+
+// 队列满时 SubmitAndWaitResult 也必须给出结果，不能让调用方永远等下去
+func TestSubmitAndWaitResultWhenQueueFull(t *testing.T) {
+	p := New(Config{WorkerCount: 1, QueueSize: 1})
+	block := make(chan struct{})
+	p.Submit(func() { <-block }) // 占住唯一的 worker
+	for p.Submit(func() {}) {    // 填满队列
+	}
+
+	select {
+	case got := <-SubmitAndWaitResult(p, func() int { return 42 }):
+		if got != 42 {
+			t.Fatalf("got %d, want 42", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SubmitAndWaitResult never delivered a result for a rejected task")
+	}
+	close(block)
+	p.Shutdown()
+}
