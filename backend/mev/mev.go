@@ -55,10 +55,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// 单个区块内每个池子参与检测的 swap 数上限
-// 已知上限：检测对每笔新 swap 是 O(n²)，n 有上限所以够用；真有单池单块上千笔 swap 再换成按地址索引
-const maxSwapsPerBlock = 256
-
 var (
 	ErrPriceImpactTooHigh = errors.New("price impact too high")
 	ErrDeadlineExpired    = errors.New("deadline expired")
@@ -84,9 +80,9 @@ type Guard struct {
 	cfg Config
 
 	mu       sync.RWMutex
-	alerts   []Alert                         // 按时间升序
-	curBlock uint64                          // pending 对应的区块号
-	pending  map[string][]*indexer.SwapEvent // 当前区块内各池子的 swap，按 logIndex 升序
+	alerts   []Alert               // 按时间升序
+	curBlock uint64                // pending 对应的区块号
+	pending  map[string]*poolBlock // 当前区块内各池子的 swap 及检测用的索引
 
 	// OnAlert 每产生一条告警后回调（实时推送用）。
 	// 在索引协程里同步调用，必须在索引器启动前设置，且不能阻塞。
@@ -95,7 +91,7 @@ type Guard struct {
 
 // NewGuard 创建 MEV 防御实例
 func NewGuard(cfg Config) *Guard {
-	return &Guard{cfg: cfg, pending: make(map[string][]*indexer.SwapEvent)}
+	return &Guard{cfg: cfg, pending: make(map[string]*poolBlock)}
 }
 
 // ===== 交易前保护 =====
@@ -230,74 +226,173 @@ func (g *Guard) detect(e *indexer.SwapEvent) (found *Alert) {
 		g.curBlock = e.BlockNumber
 		clear(g.pending)
 	}
-
-	swaps := append(g.pending[e.PoolAddress], e)
-	sort.SliceStable(swaps, func(i, j int) bool { return swaps[i].LogIndex < swaps[j].LogIndex })
-	if len(swaps) > maxSwapsPerBlock {
-		swaps = swaps[len(swaps)-maxSwapsPerBlock:]
+	pb := g.pending[e.PoolAddress]
+	if pb == nil {
+		pb = newPoolBlock()
+		g.pending[e.PoolAddress] = pb
 	}
 
-	back := len(swaps) - 1
-	for swaps[back] != e {
-		back--
-	}
-	if front, victims := findFrontRun(swaps, back); front >= 0 {
-		alert := Alert{
-			Pool:           e.PoolAddress,
-			BlockNumber:    e.BlockNumber,
-			Timestamp:      e.Timestamp,
-			Attacker:       e.Recipient,
-			AttackerSender: e.Sender,
-			FrontTx:        swaps[front].TxHash,
-			BackTx:         e.TxHash,
-			VictimTxs:      victims,
+	var match *sandwich
+	if n := len(pb.swaps); n == 0 || pb.swaps[n-1].LogIndex <= e.LogIndex {
+		// 正常情况：事件按 logIndex 顺序到达，增量检测
+		match = pb.add(e)
+	} else {
+		// 乱序到达：按 logIndex 排好后整段重放
+		swaps := append(pb.swaps, e)
+		sort.SliceStable(swaps, func(i, j int) bool { return swaps[i].LogIndex < swaps[j].LogIndex })
+		pb.reset()
+		for _, s := range swaps {
+			if m := pb.add(s); m != nil {
+				match = m
+			}
 		}
-		g.alerts = append(g.alerts, alert)
-		if len(g.alerts) > g.cfg.MaxAlerts {
-			g.alerts = g.alerts[len(g.alerts)-g.cfg.MaxAlerts:]
-		}
-		metrics.MEVSandwichDetected.Inc()
-		slog.Warn("检测到疑似三明治攻击",
-			"pool", alert.Pool, "block", alert.BlockNumber, "attacker", alert.Attacker,
-			"front_tx", alert.FrontTx, "back_tx", alert.BackTx, "victims", len(victims))
-
-		// 这一组交易已经结案，不再参与后续匹配
-		swaps = swaps[back+1:]
-		found = &alert
 	}
-	g.pending[e.PoolAddress] = swaps
-	return found
+	if match == nil {
+		return nil
+	}
+
+	alert := Alert{
+		Pool:           e.PoolAddress,
+		BlockNumber:    e.BlockNumber,
+		Timestamp:      e.Timestamp,
+		Attacker:       match.back.Recipient,
+		AttackerSender: match.back.Sender,
+		FrontTx:        match.front.TxHash,
+		BackTx:         match.back.TxHash,
+		VictimTxs:      match.victims,
+	}
+	g.alerts = append(g.alerts, alert)
+	if len(g.alerts) > g.cfg.MaxAlerts {
+		g.alerts = g.alerts[len(g.alerts)-g.cfg.MaxAlerts:]
+	}
+	metrics.MEVSandwichDetected.Inc()
+	slog.Warn("检测到疑似三明治攻击",
+		"pool", alert.Pool, "block", alert.BlockNumber, "attacker", alert.Attacker,
+		"front_tx", alert.FrontTx, "back_tx", alert.BackTx, "victims", len(alert.VictimTxs))
+	return &alert
 }
 
-// findFrontRun 以 swaps[back] 为反向平仓交易，向前找与之配对的抢跑交易
+// actor 一个交易方：按 (sender, recipient) 识别
+type actor struct{ sender, recipient string }
+
+// sandwich 一次命中：抢跑、平仓和夹在中间的受害者交易
+type sandwich struct {
+	front, back *indexer.SwapEvent
+	victims     []string
+}
+
+// poolBlock 一个池子在当前区块内的 swap，以及让检测保持近似线性的两个索引
+//
+// 判断新来的 swap B（交易方 X、方向 d）是不是一次三明治的平仓，要回答两个问题：
+//
+//  1. B 之前最近的一笔"别人的、方向与 B 相反"的 swap 在哪？（潜在的受害者，下标 v）
+//     latest 为每个方向记住最近的 swap 下标，以及最近的另一个交易方的 swap 下标，O(1) 可得
+//  2. X 自己在 v 之前最近的一笔反方向 swap 在哪？（抢跑交易，下标 f）
+//     byActor 为每个交易方、每个方向保存升序的下标列表，二分查找可得
+//
+// 两个都存在就是 X(反向) → 别人(同为反向) → X(B) 的三明治。只有命中时才扫描 f 和 B 之间的
+// swap 来收集受害者，所以每笔 swap 的检测成本是 O(log n)，整个区块 O(n log n)，
+// 不需要给单个区块内的 swap 数设上限。
+type poolBlock struct {
+	swaps   []*indexer.SwapEvent // logIndex 升序
+	byActor map[actor]*[2][]int  // 交易方 -> 两个方向上各自的 swap 下标
+	latest  [2]struct {
+		index      int   // 这个方向上最近一笔 swap 的下标，-1 表示没有
+		by         actor // 它的交易方
+		otherIndex int   // 这个方向上最近一笔"交易方不是 by"的 swap 的下标
+	}
+}
+
+func newPoolBlock() *poolBlock {
+	pb := &poolBlock{}
+	pb.reset()
+	return pb
+}
+
+func (pb *poolBlock) reset() {
+	pb.swaps = nil
+	pb.byActor = make(map[actor]*[2][]int)
+	for d := range pb.latest {
+		pb.latest[d].index, pb.latest[d].otherIndex = -1, -1
+	}
+}
+
+// direction 0 = token0 换 token1，1 = 反方向
+func direction(e *indexer.SwapEvent) int {
+	if zeroForOne(e) {
+		return 0
+	}
+	return 1
+}
+
+// add 把一笔 swap 记入区块；它构成三明治的平仓时返回命中结果，并清空已结案的这一组交易
+func (pb *poolBlock) add(e *indexer.SwapEvent) *sandwich {
+	who := actor{e.Sender, e.Recipient}
+	dir := direction(e)
+
+	if match := pb.match(e, who, dir); match != nil {
+		// 这一组交易已经结案，不再参与后续匹配
+		pb.reset()
+		return match
+	}
+
+	index := len(pb.swaps)
+	pb.swaps = append(pb.swaps, e)
+	lists := pb.byActor[who]
+	if lists == nil {
+		lists = new([2][]int)
+		pb.byActor[who] = lists
+	}
+	lists[dir] = append(lists[dir], index)
+
+	last := &pb.latest[dir]
+	if last.index >= 0 && last.by != who {
+		last.otherIndex = last.index
+	}
+	last.index, last.by = index, who
+	return nil
+}
+
+// match 以 e 为反向平仓交易查找配对的抢跑交易
 //
 // 配对条件：
 //   - 抢跑交易与平仓交易来自同一地址（sender 和 recipient 都相同）、方向相反
 //   - 两者之间至少有一笔别人的、与抢跑同向的交易（受害者）
-//
-// 返回抢跑交易的下标和受害者的交易哈希；没有命中时下标为 -1。
-func findFrontRun(swaps []*indexer.SwapEvent, back int) (front int, victims []string) {
-	b := swaps[back]
-	for front = back - 1; front >= 0; front-- {
-		f := swaps[front]
-		if !sameActor(f, b) || zeroForOne(f) == zeroForOne(b) || f.TxHash == b.TxHash {
+func (pb *poolBlock) match(e *indexer.SwapEvent, who actor, dir int) *sandwich {
+	opposite := 1 - dir
+
+	// 最近一笔别人的反方向 swap
+	last := pb.latest[opposite]
+	victim := last.index
+	if last.by == who {
+		victim = last.otherIndex
+	}
+	if victim < 0 {
+		return nil
+	}
+
+	// 自己在它之前的反方向 swap，从最近的开始找
+	lists := pb.byActor[who]
+	if lists == nil {
+		return nil
+	}
+	fronts := lists[opposite]
+	for i := sort.SearchInts(fronts, victim) - 1; i >= 0; i-- {
+		front := pb.swaps[fronts[i]]
+		if front.TxHash == e.TxHash {
 			continue
 		}
-		victims = nil
-		for _, v := range swaps[front+1 : back] {
-			if !sameActor(v, f) && zeroForOne(v) == zeroForOne(f) && v.TxHash != f.TxHash && v.TxHash != b.TxHash {
+		var victims []string
+		for _, v := range pb.swaps[fronts[i]+1:] {
+			if direction(v) == opposite && (actor{v.Sender, v.Recipient}) != who && v.TxHash != front.TxHash && v.TxHash != e.TxHash {
 				victims = append(victims, v.TxHash)
 			}
 		}
 		if len(victims) > 0 {
-			return front, victims
+			return &sandwich{front: front, back: e, victims: victims}
 		}
 	}
-	return -1, nil
-}
-
-func sameActor(a, b *indexer.SwapEvent) bool {
-	return a.Sender == b.Sender && a.Recipient == b.Recipient
+	return nil
 }
 
 // zeroForOne swap 方向：池子收到 token0（amount0 > 0）即 token0 换 token1

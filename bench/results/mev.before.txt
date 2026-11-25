@@ -1,0 +1,15 @@
+BenchmarkOnSwap/swaps_per_block=5-8         	 7778988	       152.2 ns/op	       500.0 alerts_kept	      90 B/op	       2 allocs/op
+BenchmarkOnSwap/swaps_per_block=5-8         	 7747033	       153.8 ns/op	       500.0 alerts_kept	      90 B/op	       2 allocs/op
+BenchmarkOnSwap/swaps_per_block=5-8         	 7836224	       154.5 ns/op	       500.0 alerts_kept	      90 B/op	       2 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4834070	       250.1 ns/op	       500.0 alerts_kept	     129 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4826478	       260.9 ns/op	       500.0 alerts_kept	     129 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=20-8        	 4806946	       250.2 ns/op	       500.0 alerts_kept	     129 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4437271	       272.4 ns/op	       500.0 alerts_kept	     140 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4444294	       274.6 ns/op	       500.0 alerts_kept	     140 B/op	       3 allocs/op
+BenchmarkOnSwap/swaps_per_block=100-8       	 4415077	       272.0 ns/op	       500.0 alerts_kept	     140 B/op	       3 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	  858350	      1391 ns/op	      71 B/op	       2 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	  867445	      1402 ns/op	      71 B/op	       2 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=64-8         	  863029	      1391 ns/op	      71 B/op	       2 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	   72855	     16545 ns/op	      73 B/op	       2 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	   71641	     16698 ns/op	      73 B/op	       2 allocs/op
+BenchmarkOnSwapWorstCase/swaps_per_block=256-8        	   72739	     16731 ns/op	      73 B/op	       2 allocs/op

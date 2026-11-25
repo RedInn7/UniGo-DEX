@@ -16,7 +16,7 @@ import (
 //	go test -p 2 -run '^$' -bench . -benchmem ./mev
 func BenchmarkOnSwap(b *testing.B) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil))) // 告警日志不计入
-	for _, perBlock := range []int{5, 20, 100} {
+	for _, perBlock := range []int{5, 20, 100, 1000} {
 		b.Run(fmt.Sprintf("swaps_per_block=%d", perBlock), func(b *testing.B) {
 			// 预先造好事件：8 个交易者随机方向，偶尔会构成真实的三明治
 			const actors = 8
@@ -43,6 +43,35 @@ func BenchmarkOnSwap(b *testing.B) {
 			}
 			b.StopTimer()
 			b.ReportMetric(float64(len(g.Alerts(0))), "alerts_kept")
+		})
+	}
+}
+
+// BenchmarkOnSwapWorstCase 对检测最不利的输入：同一个地址在一个区块里来回买卖、中间没有别人的交易。
+// 每笔新 swap 都有很多"自己的反向交易"可以当抢跑候选，但没有一个夹着受害者。
+func BenchmarkOnSwapWorstCase(b *testing.B) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, perBlock := range []int{64, 256} {
+		b.Run(fmt.Sprintf("swaps_per_block=%d", perBlock), func(b *testing.B) {
+			events := make([]*indexer.SwapEvent, perBlock)
+			for i := range events {
+				amount0, amount1 := big.NewInt(100), big.NewInt(-100)
+				if i%2 == 1 {
+					amount0, amount1 = amount1, amount0
+				}
+				events[i] = &indexer.SwapEvent{
+					PoolAddress: "0xpool", Sender: "0xbot", Recipient: "0xbot",
+					Amount0: amount0, Amount1: amount1, TxHash: fmt.Sprintf("0xtx%d", i),
+				}
+			}
+			g := NewGuard(DefaultConfig())
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				e := events[i%perBlock]
+				e.BlockNumber, e.LogIndex = uint64(i/perBlock), uint(i%perBlock)
+				g.OnSwap(e)
+			}
 		})
 	}
 }
