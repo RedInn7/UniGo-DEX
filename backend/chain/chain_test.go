@@ -64,6 +64,9 @@ func newEnv(t *testing.T) *env {
 	})
 	t.Cleanup(func() { backend.Close() })
 	e := &env{t: t, backend: backend, client: NewClient(backend.Client(), factoryAddr), key: key, from: from}
+	// 大多数用例直接让预置合约发池子事件，不走建池，这里当它们已经被发现过
+	// （4 个 topic 的池子事件由 LOG4 合约代发，所以 factoryAddr 也算上）
+	e.client.pools = []common.Address{poolAddr, factoryAddr}
 
 	// 先出一个区块并等节点的交易索引就绪，之后"查不到交易"才会稳定返回 NotFound
 	backend.Commit()
@@ -542,5 +545,36 @@ func TestIndexerFollowsChainAndHandlesReorg(t *testing.T) {
 	}
 	if snap := pool.Snapshot(); snap.Tick != 30 {
 		t.Fatalf("pool tick = %d, want 30", snap.Tick)
+	}
+}
+
+// 建池和这个池子的首批事件落在同一段区块里：先从 PoolCreated 认出池子，再拉到它的事件
+func TestPoolDiscoveredInSameRange(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.client.pools = nil // 从零开始发现
+
+	e.emitPoolCreated()
+	e.backend.Commit() // 区块 2
+	e.emitSwap(userA, userB, 1, -1, 11)
+	e.backend.Commit() // 区块 3
+
+	var blocks []*indexer.BlockInfo
+	for n := uint64(2); n <= 3; n++ {
+		block, err := e.client.BlockByNumber(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks = append(blocks, block)
+	}
+	events, err := e.client.BlockEvents(ctx, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events[0]) != 1 || len(events[1]) != 1 {
+		t.Fatalf("events per block: %d %d, want 1 1", len(events[0]), len(events[1]))
+	}
+	if _, ok := events[1][0].(*indexer.SwapEvent); !ok {
+		t.Fatalf("block 3 event = %T, want swap", events[1][0])
 	}
 }

@@ -1,0 +1,56 @@
+{
+  "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
+  "chainId": 11155111,
+  "factory": "0xd3b91CE78408996021a252db7c2042C0b6285e8C",
+  "manager": "0x4760f485862ef4688E6F62024d7892709103f37c",
+  "quoter": "0xf64c4520bEE32927EEDdd15572eDEE905C9e1bF0",
+  "flashArbitrage": "0xE83A051Fd92Df923b482F3E8302A7fA5071F8402",
+  "tokens": {
+    "WETH": "0x408319BE2e900205Fdf6038493DB79B6f9f8D5f4",
+    "USDC": "0xE8F6Da7cD0BcdD18B6D08E00cD4E545825fCD31c",
+    "DAI": "0x37E584568fEd8C0AceA9084629d6609EbeC32db6",
+    "WBTC": "0xC42031B92cCe82Ccf1E114cfB4F1c63272808F44"
+  },
+  "pools": [
+    {
+      "pair": "WETH/USDC",
+      "fee": 500,
+      "address": "0x5A575E5841aB35d4b3ceBc083D52e95906933934",
+      "tick": 74070
+    },
+    {
+      "pair": "WETH/USDC",
+      "fee": 3000,
+      "address": "0x3bC1d1b69429bC1d6BC03c7EB3341cA0cdCD47ac",
+      "tick": 74070
+    },
+    {
+      "pair": "USDC/DAI",
+      "fee": 500,
+      "address": "0x75F5175Ba9F48e9044a904FE467FBcde0dD90D96",
+      "tick": 0
+    },
+    {
+      "pair": "USDC/DAI",
+      "fee": 3000,
+      "address": "0x717AA68C8F983566b68dE12833c0F75CbFEaFcFe",
+      "tick": 0
+    },
+    {
+      "pair": "WBTC/DAI",
+      "fee": 3000,
+      "address": "0x3E2be08889FB54a74958cF2CB86c1bf62D32C1DB",
+      "tick": -110027
+    },
+    {
+      "pair": "WBTC/DAI",
+      "fee": 10000,
+      "address": "0x9b48ECC2d41ACD97EC6Af50D67C302cbA9f4240C",
+      "tick": -110027
+    }
+  ],
+  "chainlinkFeeds": "0x408319BE2e900205Fdf6038493DB79B6f9f8D5f4:0xE8F6Da7cD0BcdD18B6D08E00cD4E545825fCD31c:0x694AA1769357215DE4FAC081bf1f309aDC325306:18:18:3600",
+  "aggregator": "0x694AA1769357215DE4FAC081bf1f309aDC325306",
+  "startBlock": 12210726,
+  "verifiedSwap": "0x57f49b2bd6a25c3fe0100d1188501a1634e064d69e7932463d6b555811cc66a5"
+}

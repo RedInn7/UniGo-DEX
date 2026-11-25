@@ -1,11 +1,13 @@
 package chain
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum"
@@ -57,11 +59,7 @@ func (c *Client) BlockEvents(ctx context.Context, blocks []*indexer.BlockInfo) (
 		return events, nil
 	}
 	first, last := blocks[0].Number, blocks[len(blocks)-1].Number
-	logs, err := c.FilterLogs(ctx, ethereum.FilterQuery{
-		FromBlock: new(big.Int).SetUint64(first),
-		ToBlock:   new(big.Int).SetUint64(last),
-		Topics:    [][]common.Hash{eventTopics},
-	})
+	logs, err := c.rangeLogs(ctx, first, last)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +84,61 @@ func (c *Client) BlockEvents(ctx context.Context, blocks []*indexer.BlockInfo) (
 		}
 	}
 	return events, nil
+}
+
+// rangeLogs 拉取 [first, last] 内 Factory 和所有已知池子的日志，按 (区块, logIndex) 升序
+//
+// 查询必须带地址过滤：公共节点会拒绝不带地址的 eth_getLogs，而且全链同签名的日志
+// 量很大。所以分两步，先查 Factory 的 PoolCreated 把这段区块里新建的池子记下来，
+// 再按池子地址查其余事件，这样池子创建和它的首批事件落在同一批区块里也不会漏。
+// 没配 Factory 地址时（单元测试里的模拟链）退回按事件签名查全部地址。
+func (c *Client) rangeLogs(ctx context.Context, first, last uint64) ([]types.Log, error) {
+	query := ethereum.FilterQuery{
+		FromBlock: new(big.Int).SetUint64(first),
+		ToBlock:   new(big.Int).SetUint64(last),
+	}
+	if c.factory == (common.Address{}) {
+		query.Topics = [][]common.Hash{eventTopics}
+		return c.FilterLogs(ctx, query)
+	}
+
+	created := contractabi.Factory.Events["PoolCreated"]
+	query.Addresses = []common.Address{c.factory}
+	query.Topics = [][]common.Hash{{created.ID}}
+	logs, err := c.FilterLogs(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	c.poolsMu.Lock()
+	for _, lg := range logs {
+		args := make(map[string]interface{})
+		if err := created.Inputs.UnpackIntoMap(args, lg.Data); err != nil {
+			continue
+		}
+		if pool, ok := args["pool"].(common.Address); ok && !slices.Contains(c.pools, pool) {
+			c.pools = append(c.pools, pool)
+		}
+	}
+	// ponytail: 池子地址全量放进一次查询，池子多到超过节点的地址数上限时再分批
+	pools := slices.Clone(c.pools)
+	c.poolsMu.Unlock()
+	if len(pools) == 0 {
+		return logs, nil
+	}
+
+	// PoolCreated 上一步已经查过，这里只要池子自己的事件（eventTopics 的最后一项是 PoolCreated）
+	query.Addresses = pools
+	query.Topics = [][]common.Hash{eventTopics[:len(eventTopics)-1]}
+	poolLogs, err := c.FilterLogs(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	logs = append(logs, poolLogs...)
+	slices.SortFunc(logs, func(a, b types.Log) int {
+		return cmp.Or(cmp.Compare(a.BlockNumber, b.BlockNumber), cmp.Compare(a.Index, b.Index))
+	})
+	return logs, nil
 }
 
 // decodeLog 把一条原始日志解码为 indexer 的事件结构
