@@ -86,6 +86,10 @@ type Guard struct {
 	alerts   []Alert                         // 按时间升序
 	curBlock uint64                          // pending 对应的区块号
 	pending  map[string][]*indexer.SwapEvent // 当前区块内各池子的 swap，按 logIndex 升序
+
+	// OnAlert 每产生一条告警后回调（实时推送用）。
+	// 在索引协程里同步调用，必须在索引器启动前设置，且不能阻塞。
+	OnAlert func(Alert)
 }
 
 // NewGuard 创建 MEV 防御实例
@@ -188,6 +192,13 @@ func (g *Guard) recentlyAttacked(pool string, now time.Time) bool {
 
 // OnSwap 把 swap 记入当前区块，并检查它是否构成一次三明治的"反向平仓"
 func (g *Guard) OnSwap(e *indexer.SwapEvent) {
+	if alert := g.detect(e); alert != nil && g.OnAlert != nil {
+		g.OnAlert(*alert)
+	}
+}
+
+// detect 更新当前区块的 swap 序列；e 构成一次三明治的反向平仓时返回告警
+func (g *Guard) detect(e *indexer.SwapEvent) (found *Alert) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -228,8 +239,10 @@ func (g *Guard) OnSwap(e *indexer.SwapEvent) {
 
 		// 这一组交易已经结案，不再参与后续匹配
 		swaps = swaps[back+1:]
+		found = &alert
 	}
 	g.pending[e.PoolAddress] = swaps
+	return found
 }
 
 // findFrontRun 以 swaps[back] 为反向平仓交易，向前找与之配对的抢跑交易

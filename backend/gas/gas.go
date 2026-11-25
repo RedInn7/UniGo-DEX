@@ -92,6 +92,13 @@ func (e *Estimator) Estimate(ctx context.Context, gasLimit uint64) Estimate {
 	}
 }
 
+// CostWei 消耗 gasLimit 单位 gas 的预期成本（wei）= gasLimit × (baseFee + priorityFee)
+func (e *Estimator) CostWei(ctx context.Context, gasLimit uint64) *big.Int {
+	baseFee, priorityFee, _ := e.fees(ctx)
+	cost := new(big.Int).Add(baseFee, priorityFee)
+	return cost.Mul(cost, new(big.Int).SetUint64(gasLimit))
+}
+
 // fees 返回当前费用：优先用缓存内的链上数据，取不到时退回静态值
 func (e *Estimator) fees(ctx context.Context) (baseFee, priorityFee *big.Int, source string) {
 	if e.src == nil {

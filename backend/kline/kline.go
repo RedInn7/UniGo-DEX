@@ -92,6 +92,10 @@ type Aggregator struct {
 	cfg   Config
 	mu    sync.RWMutex
 	pools map[string]*poolData
+
+	// OnTrade 每记入一笔成交后回调，参数是这笔成交和更新后的 1m K 线（实时推送用）。
+	// 在索引协程里同步调用，必须在索引器启动前设置，且不能阻塞。
+	OnTrade func(trade Trade, candle Candle)
 }
 
 // NewAggregator 创建 K 线聚合器
@@ -122,20 +126,28 @@ func (a *Aggregator) OnSwap(e *indexer.SwapEvent) {
 		ZeroForOne:  e.Amount0.Sign() > 0,
 	}
 
+	candle, ok := a.record(e, trade)
+	if ok && a.OnTrade != nil {
+		a.OnTrade(trade, candle)
+	}
+}
+
+// record 把成交记入池子并更新各周期 K 线，返回更新后的 1m K 线
+func (a *Aggregator) record(e *indexer.SwapEvent, trade Trade) (Candle, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	p, ok := a.pools[e.PoolAddress]
 	if !ok {
 		if len(a.pools) >= a.cfg.MaxPools {
-			return
+			return Candle{}, false
 		}
 		p = &poolData{candles: make([][]Candle, len(intervals))}
 		a.pools[e.PoolAddress] = p
 	}
 	// 区块时间戳单调递增；时间倒退的成交不可能来自一条合法的链，丢弃
 	if n := len(p.trades); n > 0 && trade.Timestamp < p.trades[n-1].Timestamp {
-		return
+		return Candle{}, false
 	}
 
 	p.trades = append(p.trades, trade)
@@ -147,6 +159,7 @@ func (a *Aggregator) OnSwap(e *indexer.SwapEvent) {
 	for i, iv := range intervals {
 		p.candles[i] = a.merge(p.candles[i], iv.secs, c)
 	}
+	return p.candles[0][len(p.candles[0])-1], true
 }
 
 // OnReorg 丢弃区块号 >= forkBlock 的成交，并重算受影响的 K 线
