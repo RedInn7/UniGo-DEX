@@ -157,6 +157,19 @@ func TickToPrice(tick int32) float64 {
 	return math.Pow(1.0001, float64(tick))
 }
 
+// SqrtPriceX96ToPrice 将 Q64.96 的 sqrtPriceX96 换算为价格
+//
+// price = (sqrtPriceX96 / 2^96)^2，即 1 个 token0 最小单位值多少 token1 最小单位。
+// 仅用于展示和估算，sqrtPriceX96 为空或为 0 时返回 0。
+func SqrtPriceX96ToPrice(sqrtPriceX96 *big.Int) float64 {
+	if sqrtPriceX96 == nil || sqrtPriceX96.Sign() == 0 {
+		return 0
+	}
+	sqrtPrice := new(big.Float).Quo(new(big.Float).SetInt(sqrtPriceX96), new(big.Float).SetInt(Q96))
+	price, _ := new(big.Float).Mul(sqrtPrice, sqrtPrice).Float64()
+	return price
+}
+
 // PriceToTick 将价格转换为最近的 tick
 //
 // 公式：tick = floor(log(price) / log(1.0001))

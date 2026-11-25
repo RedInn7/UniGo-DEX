@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+
+	umath "unigo-dex/math"
 )
 
 // pool_state.go — 链下池子状态管理
@@ -185,17 +187,7 @@ func (p *PoolState) GetCurrentPrice() float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.SqrtPriceX96.Sign() == 0 {
-		return 0
-	}
-
-	// price = (sqrtPriceX96 / 2^96)^2
-	sqrtPriceFloat := new(big.Float).SetInt(p.SqrtPriceX96)
-	q96Float := new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(1), 96))
-	sqrtPrice := new(big.Float).Quo(sqrtPriceFloat, q96Float)
-	price := new(big.Float).Mul(sqrtPrice, sqrtPrice)
-	result, _ := price.Float64()
-	return result
+	return umath.SqrtPriceX96ToPrice(p.SqrtPriceX96)
 }
 
 // Snapshot 获取池子状态的快照（用于并发安全的路由计算）
