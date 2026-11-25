@@ -532,6 +532,19 @@ func TestKlinesAndTradesEndpoints(t *testing.T) {
 	}
 }
 
+func TestPoolsIncludePrice(t *testing.T) {
+	s := newTestServer()
+	var pools []PoolInfo
+	if code := s.do(t, "GET", "/api/v1/pools", "", &pools); code != http.StatusOK || len(pools) != 2 {
+		t.Fatalf("pools: %d %+v", code, pools)
+	}
+	for _, p := range pools {
+		if p.Price != 1 || p.Liquidity != "1000000000000000000000000" {
+			t.Fatalf("pool %s: price=%v liquidity=%s", p.Address, p.Price, p.Liquidity)
+		}
+	}
+}
+
 func TestTxStatusRequiresNode(t *testing.T) {
 	s := newTestServer()
 	var resp ErrorResponse

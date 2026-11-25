@@ -19,6 +19,7 @@ import (
 	"unigo-dex/gas"
 	"unigo-dex/indexer"
 	"unigo-dex/kline"
+	umath "unigo-dex/math"
 	"unigo-dex/metrics"
 	"unigo-dex/mev"
 	"unigo-dex/oracle"
@@ -482,6 +483,7 @@ func (s *Server) handlePools(w http.ResponseWriter, r *http.Request) {
 			Token1:      snap.Token1,
 			Fee:         snap.Fee,
 			TickSpacing: snap.TickSpacing,
+			Price:       umath.SqrtPriceX96ToPrice(snap.SqrtPriceX96),
 			Tick:        snap.Tick,
 			Liquidity:   snap.Liquidity.String(),
 		})
