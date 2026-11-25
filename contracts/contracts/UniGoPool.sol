@@ -13,6 +13,7 @@ import "./lib/SwapMath.sol";
 import "./lib/LiquidityMath.sol";
 import "./lib/FixedPoint96.sol";
 import "./lib/Math.sol";
+import "./lib/Oracle.sol";
 
 /// @title UniGoPool
 /// @notice 核心流动性池合约
@@ -35,6 +36,10 @@ import "./lib/Math.sol";
 ///      - mint/swap 完成计算后，通过回调要求调用者转入 token
 ///      - 回调后验证余额增加是否符合预期
 ///
+///      【价格预言机】
+///      - tick 或活跃流动性变化之前，把变化前的值写入观测环形数组（每个区块最多一次）
+///      - 外部合约通过 observe() 读取累计值，自行计算任意时间窗口的 TWAP
+///
 ///      【手续费】
 ///      - swap 与闪电贷的手续费按当时的活跃流动性均摊，累计进 feeGrowthGlobal
 ///      - position 在 mint/burn 时结算应得手续费到 tokensOwed，再通过 collect 提取
@@ -43,6 +48,7 @@ contract UniGoPool is IUniGoPool {
     using TickBitmap for mapping(int16 => uint256);
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
+    using Oracle for Oracle.Observation[65535];
 
     // ==================== 不可变状态 ====================
 
@@ -68,6 +74,12 @@ contract UniGoPool is IUniGoPool {
         int24 tick;
         /// @dev 池子是否已解锁（重入保护）
         bool unlocked;
+        /// @dev 最近一次写入的观测在环形数组中的位置
+        uint16 observationIndex;
+        /// @dev 观测环形数组当前已使用的容量
+        uint16 observationCardinality;
+        /// @dev 已预留的容量，下次写到数组末尾时生效
+        uint16 observationCardinalityNext;
     }
 
     /// @notice 池子的核心状态
@@ -90,6 +102,8 @@ contract UniGoPool is IUniGoPool {
     mapping(int16 => uint256) public tickBitmap;
     /// @notice Position 状态映射
     mapping(bytes32 => Position.Info) public positions;
+    /// @notice 价格预言机的观测环形数组
+    Oracle.Observation[65535] public observations;
 
     // ==================== Swap 内部结构体 ====================
 
@@ -150,10 +164,16 @@ contract UniGoPool is IUniGoPool {
 
         int24 tick = TickMath.getTickAtSqrtRatio(sqrtPriceX96);
 
+        // 写入第一条观测
+        (uint16 cardinality, uint16 cardinalityNext) = observations.initialize(_blockTimestamp());
+
         slot0 = Slot0({
             sqrtPriceX96: sqrtPriceX96,
             tick: tick,
-            unlocked: true
+            unlocked: true,
+            observationIndex: 0,
+            observationCardinality: cardinality,
+            observationCardinalityNext: cardinalityNext
         });
 
         emit Initialize(sqrtPriceX96, tick);
@@ -207,6 +227,8 @@ contract UniGoPool is IUniGoPool {
                 _slot0.sqrtPriceX96,
                 int128(amount)
             )));
+            // 活跃流动性即将变化，先写入观测
+            _writeObservation(_slot0, liquidity);
             // 更新活跃流动性
             liquidity = LiquidityMath.addDelta(liquidity, int128(amount));
         } else {
@@ -270,6 +292,8 @@ contract UniGoPool is IUniGoPool {
                 _slot0.sqrtPriceX96,
                 -int128(amount)
             )));
+            // 活跃流动性即将变化，先写入观测
+            _writeObservation(_slot0, liquidity);
             liquidity = LiquidityMath.addDelta(liquidity, -int128(amount));
         } else {
             amount1 = uint256(-int256(SqrtPriceMath.getAmount1Delta(
@@ -431,6 +455,8 @@ contract UniGoPool is IUniGoPool {
 
         // === 更新全局状态 ===
         if (state.tick != _slot0.tick) {
+            // tick 即将变化，先用变化前的 tick 和流动性写入观测
+            _writeObservation(_slot0, liquidity);
             (slot0.sqrtPriceX96, slot0.tick) = (state.sqrtPriceX96, state.tick);
         } else {
             slot0.sqrtPriceX96 = state.sqrtPriceX96;
@@ -529,7 +555,64 @@ contract UniGoPool is IUniGoPool {
         emit Flash(msg.sender, recipient, amount0, amount1, paid0, paid1);
     }
 
+    // ==================== 价格预言机 ====================
+
+    /// @inheritdoc IUniGoPool
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        override
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)
+    {
+        Slot0 memory _slot0 = slot0;
+        return observations.observe(
+            _blockTimestamp(),
+            secondsAgos,
+            _slot0.tick,
+            _slot0.observationIndex,
+            liquidity,
+            _slot0.observationCardinality
+        );
+    }
+
+    /// @inheritdoc IUniGoPool
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext)
+        external
+        override
+        lock
+    {
+        uint16 observationCardinalityNextOld = slot0.observationCardinalityNext;
+        uint16 observationCardinalityNextNew = observations.grow(
+            observationCardinalityNextOld,
+            observationCardinalityNext
+        );
+        slot0.observationCardinalityNext = observationCardinalityNextNew;
+
+        if (observationCardinalityNextOld != observationCardinalityNextNew) {
+            emit IncreaseObservationCardinalityNext(observationCardinalityNextOld, observationCardinalityNextNew);
+        }
+    }
+
     // ==================== 内部函数 ====================
+
+    /// @dev 当前区块时间戳，截断为 32 位（预言机内部按回绕处理）
+    function _blockTimestamp() private view returns (uint32) {
+        return uint32(block.timestamp);
+    }
+
+    /// @dev 写入一条观测，记录变化之前的 tick 和活跃流动性
+    /// @param _slot0 变化之前的 slot0
+    /// @param liquidityBefore 变化之前的活跃流动性
+    function _writeObservation(Slot0 memory _slot0, uint128 liquidityBefore) private {
+        (slot0.observationIndex, slot0.observationCardinality) = observations.write(
+            _slot0.observationIndex,
+            _blockTimestamp(),
+            _slot0.tick,
+            liquidityBefore,
+            _slot0.observationCardinality,
+            _slot0.observationCardinalityNext
+        );
+    }
 
     /// @dev 更新 position 两端的 tick，并结算 position 的手续费和流动性
     function _updatePosition(

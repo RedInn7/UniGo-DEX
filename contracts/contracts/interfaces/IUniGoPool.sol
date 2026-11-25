@@ -9,6 +9,7 @@ pragma solidity ^0.8.20;
 ///      - 代币交换（swap）
 ///      - 提取手续费（collect）
 ///      - 闪电贷（flash）
+///      - 价格预言机（observe）
 interface IUniGoPool {
     /// @notice 添加流动性事件
     /// @param sender 调用 mint 的地址（通常是 Manager 合约）
@@ -86,6 +87,14 @@ interface IUniGoPool {
     /// @param sqrtPriceX96 初始价格（Q64.96 格式）
     /// @param tick 初始价格对应的 tick
     event Initialize(uint160 sqrtPriceX96, int24 tick);
+
+    /// @notice 预言机观测容量扩容事件
+    /// @param observationCardinalityNextOld 扩容前的预留容量
+    /// @param observationCardinalityNextNew 扩容后的预留容量
+    event IncreaseObservationCardinalityNext(
+        uint16 observationCardinalityNextOld,
+        uint16 observationCardinalityNextNew
+    );
 
     /// @notice 池子的 token0 地址（地址较小的 token）
     function token0() external view returns (address);
@@ -172,4 +181,20 @@ interface IUniGoPool {
         uint256 amount1,
         bytes calldata data
     ) external;
+
+    /// @notice 查询历史时刻的预言机累计值，用于计算 TWAP
+    /// @dev 时间窗口 [t1, t2] 的平均 tick = (tickCumulative(t2) - tickCumulative(t1)) / (t2 - t1)
+    ///      查询的时刻早于最老的观测时 revert
+    /// @param secondsAgos 每个元素是回看的秒数，0 表示当前时刻
+    /// @return tickCumulatives 各时刻的 tick 累计值
+    /// @return secondsPerLiquidityCumulativeX128s 各时刻的每单位流动性秒数累计值
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s);
+
+    /// @notice 扩大预言机观测环形数组的预留容量
+    /// @dev 任何人都可以调用并支付扩容的 gas；容量只增不减
+    /// @param observationCardinalityNext 期望的容量
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }
