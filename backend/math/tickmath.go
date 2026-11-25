@@ -56,7 +56,7 @@ func init() {
 // baseRatio 是 absTick 第 0 位为 0 时的基础值（Q128.128 格式的 1.0）
 var baseRatio, _ = new(big.Int).SetString("100000000000000000000000000000000", 16)
 
-// GetSqrtRatioAtTick 根据 tick 计算 sqrtPriceX96
+// nativeGetSqrtRatioAtTick 根据 tick 计算 sqrtPriceX96
 //
 // 算法原理（查表法）：
 //
@@ -66,7 +66,7 @@ var baseRatio, _ = new(big.Int).SetString("100000000000000000000000000000000", 1
 //
 //	如果 tick > 0，取倒数（因为预计算值是 1/sqrt(1.0001^(2^i))）
 //	最后从 Q128.128 格式转换为 Q64.96
-func GetSqrtRatioAtTick(tick int32) (*big.Int, error) {
+func nativeGetSqrtRatioAtTick(tick int32) (*big.Int, error) {
 	absTick := int64(tick)
 	if absTick < 0 {
 		absTick = -absTick
@@ -109,13 +109,13 @@ func GetSqrtRatioAtTick(tick int32) (*big.Int, error) {
 	return result, nil
 }
 
-// GetTickAtSqrtRatio 根据 sqrtPriceX96 计算 tick
+// nativeGetTickAtSqrtRatio 根据 sqrtPriceX96 计算 tick
 //
 // 算法原理（基于 log2）：
 //
 //	tick = floor(log_{1.0001}(sqrtPrice^2))
 //	使用浮点近似 + 边界验证确保精确
-func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
+func nativeGetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 	if sqrtPriceX96.Cmp(MinSqrtRatio) < 0 || sqrtPriceX96.Cmp(MaxSqrtRatio) >= 0 {
 		return 0, errors.New("sqrtPriceX96 out of range")
 	}
@@ -137,7 +137,7 @@ func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 	// 浮点近似可能差一两个 tick，用精确的 GetSqrtRatioAtTick 修正到
 	// sqrtRatio(tick) <= sqrtPriceX96 < sqrtRatio(tick+1) 成立为止
 	for {
-		sqrtAtTick, err := GetSqrtRatioAtTick(tick)
+		sqrtAtTick, err := nativeGetSqrtRatioAtTick(tick)
 		if err != nil {
 			return 0, err
 		}
@@ -145,7 +145,7 @@ func GetTickAtSqrtRatio(sqrtPriceX96 *big.Int) (int32, error) {
 			tick--
 			continue
 		}
-		sqrtAtNext, err := GetSqrtRatioAtTick(tick + 1)
+		sqrtAtNext, err := nativeGetSqrtRatioAtTick(tick + 1)
 		if err != nil {
 			return 0, err
 		}

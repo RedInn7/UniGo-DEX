@@ -5,6 +5,7 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
+    "test:oss": "MATH_IMPL=oss hardhat test",
     "deploy": "hardhat run scripts/deploy.js --network localhost"
   },
   "devDependencies": {
