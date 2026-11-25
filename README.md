@@ -4,7 +4,7 @@
 
 我做它是想弄明白三件事：AMM 的数学在链上到底怎么算；链下报价怎样才能和链上一个 wei 都不差；链会重组、节点会挂、价格会被人操纵的时候，后端该怎么办。所以没有调 SDK，`mulDiv`、`TickMath`、swap 主循环都是自己写的，Go 这边用 `math/big` 又照着写了一遍。
 
-[整体架构](#整体架构) · [合约](#合约) · [后端](#后端) · [安全](#安全) · [压测](#压测) · [测试](#测试) · [快速开始](#快速开始) · [API](#api-一览) · [详细文档](#详细文档)
+[整体架构](#整体架构) · [合约](#合约) · [后端](#后端) · [安全](#安全) · [压测](#压测) · [测试](#测试) · [测试网](#测试网部署) · [快速开始](#快速开始) · [API](#api-一览) · [详细文档](#详细文档)
 
 ## 技术栈
 
@@ -206,7 +206,7 @@ sequenceDiagram
 - Chainlink 的 `latestRoundData()` 永远会返回一组数，能不能用要查五项：答案为正、轮次已完成、不是旧轮次、时间不晚于最新区块、没超过心跳。过期判断用链上最新区块的时间，不用本机时钟。
 - 换算口径最容易错。喂价是按人类单位的“1 个 base 值多少 quote”，池子价格是没调 decimals 的 `token1 / token0`，哪个币是 token0 还得看地址大小。
 - 喂价不可用时不拿坏数据硬比，降级成现价对 TWAP 两方，响应里写明原因。
-- 本地部署和集成测试里的聚合器是一个可控的模拟合约 `TestAggregator`，实现的是 `AggregatorV3Interface`。接到别的网络时，把 `CHAINLINK_FEEDS` 换成那条链上的聚合器地址。
+- 本地和集成测试里的聚合器是一个可控的模拟合约 `TestAggregator`，方便造过期、负数这类坏数据。Sepolia 上接的是 Chainlink 官方的 ETH / USD 喂价，见[测试网部署](#测试网部署)。
 
 三明治检测一开始是每来一笔 swap 就向前逐笔配对。同一个地址在一个区块里来回买卖 256 笔时，单笔要 16,698 ns。改成按交易方和方向建索引之后是 49 ns，而且不随区块里的笔数增长。
 
@@ -312,14 +312,59 @@ SSE 的端到端延迟里含索引器的轮询等待，压测时轮询间隔设�
 
 ## 测试网部署
 
-<!-- TESTNET -->
+全套合约部署在 Sepolia 上，后端连公共节点就能直接索引和报价。地址清单也存了一份在 [contracts/deployments/sepolia.json](contracts/deployments/sepolia.json)。
+
+| 合约 | 地址 |
+|---|---|
+| UniGoFactory | [`0xd3b91CE78408996021a252db7c2042C0b6285e8C`](https://sepolia.etherscan.io/address/0xd3b91CE78408996021a252db7c2042C0b6285e8C) |
+| UniGoManager | [`0x4760f485862ef4688E6F62024d7892709103f37c`](https://sepolia.etherscan.io/address/0x4760f485862ef4688E6F62024d7892709103f37c) |
+| UniGoQuoter | [`0xf64c4520bEE32927EEDdd15572eDEE905C9e1bF0`](https://sepolia.etherscan.io/address/0xf64c4520bEE32927EEDdd15572eDEE905C9e1bF0) |
+| FlashArbitrage | [`0xE83A051Fd92Df923b482F3E8302A7fA5071F8402`](https://sepolia.etherscan.io/address/0xE83A051Fd92Df923b482F3E8302A7fA5071F8402) |
+| 测试代币 WETH | [`0x408319BE2e900205Fdf6038493DB79B6f9f8D5f4`](https://sepolia.etherscan.io/address/0x408319BE2e900205Fdf6038493DB79B6f9f8D5f4) |
+| 测试代币 USDC | [`0xE8F6Da7cD0BcdD18B6D08E00cD4E545825fCD31c`](https://sepolia.etherscan.io/address/0xE8F6Da7cD0BcdD18B6D08E00cD4E545825fCD31c) |
+| 测试代币 DAI | [`0x37E584568fEd8C0AceA9084629d6609EbeC32db6`](https://sepolia.etherscan.io/address/0x37E584568fEd8C0AceA9084629d6609EbeC32db6) |
+| 测试代币 WBTC | [`0xC42031B92cCe82Ccf1E114cfB4F1c63272808F44`](https://sepolia.etherscan.io/address/0xC42031B92cCe82Ccf1E114cfB4F1c63272808F44) |
+| 池子 WETH/USDC 0.05% | [`0x5A575E5841aB35d4b3ceBc083D52e95906933934`](https://sepolia.etherscan.io/address/0x5A575E5841aB35d4b3ceBc083D52e95906933934) |
+| 池子 WETH/USDC 0.3% | [`0x3bC1d1b69429bC1d6BC03c7EB3341cA0cdCD47ac`](https://sepolia.etherscan.io/address/0x3bC1d1b69429bC1d6BC03c7EB3341cA0cdCD47ac) |
+| 池子 USDC/DAI 0.05% | [`0x75F5175Ba9F48e9044a904FE467FBcde0dD90D96`](https://sepolia.etherscan.io/address/0x75F5175Ba9F48e9044a904FE467FBcde0dD90D96) |
+| 池子 USDC/DAI 0.3% | [`0x717AA68C8F983566b68dE12833c0F75CbFEaFcFe`](https://sepolia.etherscan.io/address/0x717AA68C8F983566b68dE12833c0F75CbFEaFcFe) |
+| 池子 WBTC/DAI 0.3% | [`0x3E2be08889FB54a74958cF2CB86c1bf62D32C1DB`](https://sepolia.etherscan.io/address/0x3E2be08889FB54a74958cF2CB86c1bf62D32C1DB) |
+| 池子 WBTC/DAI 1% | [`0x9b48ECC2d41ACD97EC6Af50D67C302cbA9f4240C`](https://sepolia.etherscan.io/address/0x9b48ECC2d41ACD97EC6Af50D67C302cbA9f4240C) |
+| Chainlink ETH / USD（官方喂价） | [`0x694AA1769357215DE4FAC081bf1f309aDC325306`](https://sepolia.etherscan.io/address/0x694AA1769357215DE4FAC081bf1f309aDC325306) |
+
+测试网上不部署模拟聚合器，`CHAINLINK_FEEDS` 指向 Chainlink 官方的 ETH / USD 喂价，WETH/USDC 两个池子的初始价格也取自它。
+
+部署完做了一次对账：让后端给 1 WETH 换 WBTC 报价，路径是 WETH → USDC → DAI → WBTC 三跳，然后真的发一笔交易。
+
+| 来源 | 到手 WBTC（wei） |
+|---|--:|
+| 后端 `/quote` | 27340118244536118 |
+| 链上 Quoter | 27340118244536118 |
+| [实际成交](https://sepolia.etherscan.io/tx/0x57f49b2bd6a25c3fe0100d1188501a1634e064d69e7932463d6b555811cc66a5) | 27340118244536118 |
+
+三个数逐位相同。这笔成交之后在后端的 `/trades` 和 `/tx` 里都能查到，现价、TWAP、Chainlink 三方校验的状态都是 `ok`。
+
+上测试网才碰到三个问题，本地节点上都不会出现：
+
+- 公共 RPC 背后是好几台节点。交易确认后马上读池子状态，请求可能落到还没同步的那台上，读回来的是旧值。部署脚本原先这样读初始 tick，结果有一个池子的流动性加到了错的价位。现在池子地址和 tick 都从交易回执的事件里取，读操作带重试，脚本也能从中断的地方续跑。
+- Sepolia 的区块头比 go-ethereum v1.17.3 认识的多了两个字段，本地按字段复算出来的区块哈希和链上的对不上，父哈希校验会一直报 Reorg。改成直接用节点返回的 `hash`。
+- 公共节点不接受不带合约地址的 `eth_getLogs`。现在每段区块先查 Factory 的 `PoolCreated`，把新池子记下来，再按池子地址查其余事件，建池和它的首批事件落在同一段里也不会漏。
+
+自己部署一套：
+
+```bash
+cd contracts
+DEPLOYER_KEY=0x... npx hardhat run scripts/deploy.js --network sepolia
+```
+
+脚本最后会打印后端的启动命令。连现成的这一套，把 `sepolia.json` 里的地址填进环境变量，`START_BLOCK` 用里面的 `startBlock`。
 
 ## 快速开始
 
 需要 Node.js 18 以上和 Go 1.24 以上。
 
 ```bash
-git clone <repo-url> && cd UniGo-DEX
+git clone https://github.com/RedInn7/UniGo-DEX.git && cd UniGo-DEX
 
 # 合约
 cd contracts && npm install
