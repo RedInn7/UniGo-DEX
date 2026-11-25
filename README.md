@@ -2615,32 +2615,181 @@ server.Shutdown(shutdownCtx)
 
 ---
 
+## 测试体系
+
+测试分三层：合约测试验证链上逻辑本身；后端单元测试验证各模块；端到端集成测试把两者接在一个真实节点上，验证“链下算的和链上跑的是同一个结果”。
+
+### 合约测试（109 个用例）
+
+```bash
+cd contracts && npx hardhat test
+```
+
+| 测试文件 | 用例数 | 覆盖内容 |
+|---------|-------|---------|
+| `UniGoPool.test.js` | 24 | 初始化、mint、swap、burn / collect、跨 tick 的手续费分配、Manager 期限与滑点保护、回调权限、闪电贷 |
+| `UniGoManager.test.js` | 18 | 多跳 `exactInput`、`exactOutputSingle`、多跳报价 `quoteExactInput`、Pool 真伪校验 |
+| `Security.test.js` | 15 | 安全回归：tick 流动性上限、代币兼容性、零流动性闪电贷、套利部分成交、Manager 只接受精确输入 |
+| `Math.test.js` | 13 | TickMath 双向转换、BitMath，与已知值和高精度参照实现对照 |
+| `Oracle.test.js` | 12 | TWAP：初始化、恒定价格、价格变动加权、查询范围、扩容与环形覆盖 |
+| `FlashArbitrage.test.js` | 10 | 套利获利、价格收敛、无利可图时回滚、参数与权限校验 |
+| `UniGoFactory.test.js` | 10 | 费率配置、创建池子、重复创建与非法参数、Pool 属性 |
+| `Gas.test.js` | 6 | Gas 基准（见 [Benchmark](#benchmark-性能对比)） |
+| `Invariants.test.js` | 1 | 固定种子的不变量随机测试 |
+
+**固定种子的不变量随机测试**
+
+单元测试只能覆盖想得到的场景。`Invariants.test.js` 用固定种子（默认 42）的伪随机数发生器（mulberry32）对一个池子连续执行 300 步随机操作——mint、burn、双向 swap、精确输出 swap、flash、collect，以及在极端区间 mint 接近 `int128` 上限流动性的攻击性操作——**每一步之后**都检查四条不变量：
+
+| 不变量 | 含义 |
+|--------|------|
+| 偿付能力 | 池子两种 token 的余额 ≥ 所有 position 的应得本金 + 未领手续费 + 已结算未提取数量 |
+| 活跃流动性 | `pool.liquidity` 等于所有覆盖当前 tick 的 position 流动性之和 |
+| 手续费单调 | `feeGrowthGlobal` 单调不减 |
+| tick 记账 | 每个 tick 的 `liquidityGross / liquidityNet` 与所有 position 的流动性吻合，且不超过单 tick 上限 |
+
+测试还断言每种操作都被执行过、价格确实多次越过区间边界、攻击性的巨额 mint 既有被上限挡住的也有在上限以内如实记账的。最后所有 LP 全部撤出并提取，池子必须付得出每一笔，且只剩舍入产生的零头。种子固定意味着失败可以稳定复现；换种子或加长步数：
+
+```bash
+INVARIANT_SEED=7 INVARIANT_STEPS=1000 npx hardhat test test/Invariants.test.js
+```
+
+**与 Uniswap V3 已知值对照**
+
+- `TickMath.getSqrtRatioAtTick` 在边界 tick 的返回值与 V3 一致；20 个魔数常量逐个（tick = ±2^i）与高精度计算比对
+- `getTickAtSqrtRatio` 与正向函数往返一致，任意价格都满足 `ratio(tick) <= price < ratio(tick + 1)`
+- BitMath 的 256 个单比特输入逐一验证，并与参照实现做伪随机对比
+- 三个费率档的 `maxLiquidityPerTick` 与 V3 对应池的已知值一致
+
+**安全回归测试**
+
+`Security.test.js` 的每一组对应一类问题，描述的是必须成立的行为：单 tick 流动性上限挡住 `liquidityNet` 回绕攻击（含一条按上限走完整个攻击序列、验证诚实 LP 仍能全额撤出的用例）；无返回值代币和返回 `false` 的代币都被正确处理；活跃流动性为 0 时闪电贷被拒绝；FlashArbitrage 部分成交时整笔回滚且合约不留余额；`Manager.swap` 拒绝精确输出。
+
+### 后端单元测试（15 个包，80 个测试函数）
+
+```bash
+cd backend && go test -p 2 ./...
+```
+
+| 包 | 测试数 | 重点 |
+|----|-------|------|
+| `chain` | 12 | 在 go-ethereum 模拟后端上：区块头、事件解码、伪造 `PoolCreated` 被忽略、畸形日志跳过、交易状态、广播、EIP-1559 费用、断路器熔断、索引器跟链并处理 Reorg、路径与调用数据编码 |
+| `chain/contractabi` | 2 | 内嵌 ABI 与编译产物一致 |
+| `mev` | 11 | 三明治命中 / 不误报 / 经路由合约下单 / 按 logIndex 排序、Reorg 丢弃告警、价格冲击、滑点与 deadline 检查 |
+| `api` | 10 | 报价、交易前保护、验签、待签名交易构造、K 线 / 成交 / 套利 / SSE 端点、按 IP 限流 |
+| `math` | 6 | 已知值、往返一致性、`ComputeSwapStep` |
+| `router` | 6 | 逐 tick 模拟、tick 查找与位图参照实现一致、精确输出与精确输入互逆、价格限制 |
+| `kline` | 5 | 多周期聚合、Reorg 重算、内存上限、并发访问 |
+| `indexer` | 4 | 事件回放、Reorg 回滚并重新索引、回滚分叉上创建的池子 |
+| `arb` | 4 | 最优借入量、无机会、扣除 gas、机会生命周期 |
+| `circuitbreaker` | 4 | 状态转换、恢复、回调 |
+| `workerpool` | 4 | 功能测试（另有 3 个 Benchmark） |
+| `eip712` | 3 | 摘要与标准类型化数据实现一致、验签与防重放、非法字段 |
+| `gas` | 3 | 链上费用、缓存、退回静态估算 |
+| `oracle` | 3 | TWAP 校验、三方交叉验证、池内价格喂价 |
+| `ws` | 3 | 推送与类型过滤、慢客户端被断开且不阻塞、关闭时断开客户端 |
+
+### 端到端集成测试
+
+```bash
+cd backend && go test -p 2 -tags integration -count=1 -timeout 15m ./integration
+```
+
+带 `integration` 构建标签，默认的 `go test ./...` 不会跑到它。测试**自己拉起一个 Hardhat 节点**（空闲端口），用编译产物部署 Factory / Manager / Quoter / FlashArbitrage 和三种测试代币，建 4 个池子、铺 11 个头寸，再按 `main.go` 的装配方式把后端各模块接到这个节点上，起一个 HTTP 服务。运行前需要 `contracts/` 下已安装依赖（`npm install`）。
+
+`TestEndToEnd` 的 11 个场景按顺序在同一条链上执行：
+
+| 场景 | 验证内容 |
+|------|---------|
+| 索引器状态与链上一致 | 链下重建的每个池子的价格、tick、活跃流动性与链上 `slot0 / liquidity` 完全相等 |
+| 链下报价与链上 Quoter 一致 | 60 条单跳 / 多跳报价逐位相等；做几笔真实 swap（含穿越 tick）之后再比一轮 |
+| 多跳交易构造、签名、广播并确认 | A → C 选出两跳路径 A→B→C 而不是 1% 的直连池；链上抽检一致；EIP-712 验签后广播；同一签名重放被拒（401）；别人签的 `raw_tx` 冒充 owner 被拒（403）；状态从 `pending_confirmation` 走到 `confirmed`；到手数量与报价逐位一致 |
+| 单跳 swap 与 `exactOutputSingle` | 到手 / 付出的数量与链下计算逐位一致 |
+| K 线与成交记录 | 多跳交易的第二跳出现在成交记录里；最新成交价等于链上现价；1m / 1h K 线的笔数和成交量等于逐笔合计；SSE 收到推送 |
+| TWAP 读数与手算一致及降级 | 在精确时间点做两笔 swap，链上读数等于按持续时间加权的手算平均 tick；观测不足时退到能覆盖的最长窗口；再不足则明确报不可用 |
+| 现价偏离 TWAP 时拒绝交易 | 单区块大单把价格砸偏后，构造交易返回 403、报价带警告；价格买回后恢复 |
+| 三明治攻击检测 | 关闭自动出块，把“攻击者买入 → 受害者同向买入 → 攻击者反向卖出”三笔交易按小费排进同一区块；产生 1 条告警且内容正确；被夹的池子推荐滑点收紧到 0.1% |
+| 套利机会扫描与执行 | 制造价差后扫描器给出机会；零本金账户原样执行调用数据，实际获利与链下预测逐位相等；执行后机会消失 |
+| 真实节点上的 Reorg 回滚 | `evm_snapshot` → 出一个带 swap 的区块 → `evm_revert` → 换一笔不同的 swap；索引器检测到 Reorg，状态回到与链上一致，被回滚的成交从成交记录和 K 线里消失 |
+| 全部场景之后仍然一致 | 再比一轮状态和 60 条报价；`/metrics` 里链上抽检不一致次数为 0 |
+
+一次实际运行的输出节选：
+
+```
+[初始状态] 对比 60 条报价：60 条两边数值逐位一致（其中 11 条穿越了已初始化的 tick，单条最多 4 个）
+多跳 A→B→C：投入 5000000000000000000，到手 4996415352936063385，与链下报价逐位一致；gas 实际 199260 / 估算上限 267133
+TWAP：tick1=-18 持续 100s，tick2=9 持续 50s，手算平均 tick=-9，链上读数 -9
+操纵检测：现价 0.811815，150 秒 TWAP 1.000600，偏离 18.87%，交易被拒绝
+套利：借入 34868164334402465845147，发起人获利 1060294620131858209393（与链下预测逐位一致），gas 367570；执行前价差 5.910%，执行后 0.648%
+[全部场景之后] 对比 60 条报价：60 条两边数值逐位一致（其中 13 条穿越了已初始化的 tick，单条最多 5 个）
+```
+
+**节点进程的回收**有三层保险（`harness_test.go`）：正常结束时 `TestMain` 关掉节点并等它退出；节点跑在独立进程组里，退出时整组 SIGKILL；测试进程被强杀时，包装脚本读着的管道 EOF，随即杀掉节点，不留孤儿进程。
+
+---
+
 ## Benchmark 性能对比
+
+### 合约 Gas 基准
+
+`contracts/test/Gas.test.js` 逐个场景记录单笔交易的 `gasUsed`（经 Manager 调用，Solidity 0.8.20，optimizer runs=200，viaIR）：
+
+```bash
+cd contracts && REPORT_GAS=1 npx hardhat test
+```
+
+| 场景 | gasUsed |
+|------|--------:|
+| mint 新区间（两端 tick 均未初始化） | 264,208 |
+| mint 追加到已有 position | 179,895 |
+| 单跳 swap（不跨 tick） | 111,795 |
+| 单跳 swap（跨 1 个已初始化 tick） | 150,411 |
+| 两跳 `exactInput` | 205,465 |
+| `exactOutputSingle`（不跨 tick） | 109,926 |
+| flash（借 token0） | 75,798 |
+| flash（同时借两种） | 114,597 |
+
+| 观察 | 数据 | 原因 |
+|------|------|------|
+| 新建 position 比追加贵 8.4 万 gas | 264,208 vs 179,895 | 两端 tick 首次初始化要写新的 storage slot、翻转位图 |
+| 穿越一个已初始化的 tick 多 3.9 万 gas | 150,411 vs 111,795 | `Tick.cross` 翻转两个 `feeGrowthOutside` 并更新活跃流动性，外加一轮循环 |
+| 两跳不到单跳的 2 倍 | 205,465 vs 111,795 × 2 | 交易的固定开销只付一次 |
+| 精确输出与精确输入基本同价 | 109,926 vs 111,795 | 走的是同一个 swap 循环 |
+
+同一次运行的 hardhat-gas-reporter 汇总（部分）：
+
+| 合约 / 方法 | 平均 gas |
+|------------|---------:|
+| `UniGoFactory.createPool`（CREATE2 部署一个 Pool） | 3,811,025 |
+| `UniGoPool.initialize` | 70,502 |
+| `UniGoPool.burn` | 85,760 |
+| `UniGoPool.collect` | 54,668 |
+| `FlashArbitrage.arbitrage`（闪电贷 + 两次 swap + 还款） | 304,040 |
+| 部署 `UniGoManager` | 1,043,649 |
+| 部署 `UniGoQuoter` | 564,918 |
+| 部署 `FlashArbitrage` | 901,756 |
 
 ### Goroutine 池 vs 朴素 goroutine
 
-在 Apple M2 上运行 `go test -bench=. -benchmem`：
+在 Apple M2（Go 1.26，darwin/arm64）上运行 `go test ./workerpool/ -run '^$' -bench=. -benchmem -count=3`，取三次中的典型值：
 
 ```
                                         耗时/op       内存/op      allocs/op
-BenchmarkNaiveGoroutine (1000 tasks)    664μs        16.0 KB      1001
-BenchmarkPooledGoroutine (1000 tasks)   462μs        16.0 KB      1001
+BenchmarkNaiveGoroutine (1000 tasks)    206μs        16.0 KB      1001
+BenchmarkPooledGoroutine (1000 tasks)   226μs        16.0 KB      1001
 
 BenchmarkGoroutineMemory:
-  Naive  (10000 tasks)                  22.6ms       1.19 MB      20445
-  Pool   (10000 tasks)                  13.7ms       0.16 MB      10011
+  Naive  (10000 tasks)                  2.85ms       1.12 MB      20030
+  Pool   (10000 tasks)                  3.25ms       0.16 MB      10006
 ```
 
-| 场景 | 提升 | 原因 |
-|------|------|------|
-| 1000 任务延迟 | 30% 更快 | 无 goroutine 创建/销毁开销 |
-| 10000 任务延迟 | 39% 更快 | 调度器管理的 goroutine 数固定 |
-| 10000 任务内存 | 86% 更少 | 栈空间复用，无重复分配 |
-| 10000 任务 allocs | 51% 更少 | GC 扫描范围更小，STW 更短 |
+| 指标（10000 任务） | 朴素 go func() | Goroutine 池 | 变化 |
+|-------------------|---------------|-------------|------|
+| 内存分配 | 1.12 MB | 0.16 MB | **减少 86%** |
+| 分配次数 | 20030 | 10006 | **减少 50%** |
+| 耗时 | 2.85ms | 3.25ms | 同一量级 |
 
-**关键洞察**：任务规模越大，池化的优势越明显。这是因为朴素方案的开销与任务数线性增长，而池化方案的开销是固定的。
-
-运行方式：`cd backend && go test ./workerpool/ -bench=. -benchmem -count=3`
+**关键洞察**：池化的收益在内存和可控性上，而不在单次耗时。任务本身很轻时，朴素方案的耗时与池化在同一量级（任务要经过一次 channel 传递）；但朴素方案每个任务都要分配一个新 goroutine 的栈，10000 个任务的内存分配是池化的 7 倍，GC 压力随任务数线性增长。池化方案把 goroutine 数固定在 Worker 数，内存开销与任务数无关，并且有界队列天然提供背压——这正是路由引擎在行情高峰期需要的性质。
 
 ---
 
@@ -2649,7 +2798,7 @@ BenchmarkGoroutineMemory:
 ### 环境要求
 
 - Node.js >= 18
-- Go >= 1.21
+- Go >= 1.24
 
 ### 编译与测试
 
@@ -2661,42 +2810,139 @@ cd UniGo-DEX
 # === 智能合约 ===
 cd contracts
 npm install
-npx hardhat compile    # 编译 23 个 Solidity 文件
-npx hardhat test       # 运行 14 个合约测试
+npx hardhat compile             # 编译合约（项目自身 27 个 .sol 文件）
+npx hardhat test                # 109 个合约测试
+REPORT_GAS=1 npx hardhat test   # 同时打印 Gas 基准和 gas-reporter 汇总
 
 # === Go 后端 ===
 cd ../backend
-go build ./...         # 编译所有 12 个包
-go test ./...          # 运行所有测试（math + circuitbreaker + workerpool）
+go build ./...                  # 编译全部 19 个包
+go test -p 2 ./...              # 单元测试（15 个包，80 个测试函数）
 
-# 运行 benchmark
-go test ./workerpool/ -bench=. -benchmem -count=3
+# 端到端集成测试（自起 Hardhat 节点，需要 contracts/ 已 npm install）
+go test -p 2 -tags integration -count=1 -timeout 15m ./integration
 
-# 启动后端
-go run main.go         # API 运行在 :8080
+# Goroutine 池 benchmark
+go test ./workerpool/ -run '^$' -bench=. -benchmem -count=3
 ```
 
-### 部署到本地 Hardhat 网络
+也可以用 Makefile：
+
+| 命令 | 作用 |
+|------|------|
+| `make install` | 安装合约和后端依赖 |
+| `make compile` | 编译合约 |
+| `make test` / `make test-go` / `make test-all` | 合约测试 / Go 单元测试 / 两者 |
+| `make test-integration` | 端到端集成测试 |
+| `make gas` | 合约测试并打印 Gas 报告 |
+| `make abi` | 编译合约并重新生成后端内嵌的 ABI |
+| `make node` / `make deploy` | 启动本地 Hardhat 节点 / 部署到本地节点 |
+| `make build-backend` / `make run-backend` | 编译 / 运行后端 |
+
+### 本地部署并启动后端
 
 ```bash
-# 终端 1：启动本地节点
+# 终端 1：启动本地 Hardhat 节点（http://127.0.0.1:8545，chainId 31337）
 cd contracts && npx hardhat node
 
-# 终端 2：部署合约
+# 终端 2：部署 Factory / Manager / Quoter、两个测试代币（WETH、USDC），
+#         创建并初始化 WETH/USDC 0.3% 池
 cd contracts && npx hardhat run scripts/deploy.js --network localhost
 ```
 
+部署脚本会打印各合约地址。在全新启动的节点上地址是固定的（以脚本输出为准）：
+
+```
+Factory:   0x5FbDB2315678afecb367f032d93F642f64180aa3
+Manager:   0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+Quoter:    0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
+WETH:      0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+USDC:      0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9
+Pool:      0x6c7b79509c47DA244DEf7c87a02816B6c39DB61d
+```
+
+```bash
+# 终端 3：把地址通过环境变量交给后端并启动
+cd backend
+RPC_URL=http://127.0.0.1:8545 \
+FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+MANAGER_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+QUOTER_ADDRESS=0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 \
+WETH_ADDRESS=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9 \
+go run main.go                  # API 运行在 :8080
+
+# 验证：索引器已从链上事件重建出池子
+curl localhost:8080/health
+curl localhost:8080/api/v1/pools
+# [{"address":"0x6c7b…b61d","token0":"0xcf7e…","token1":"0xdc64…","fee":3000,"tick_spacing":60,"price":2000,"tick":76012,"liquidity":"0"}]
+curl localhost:8080/api/v1/status
+curl "localhost:8080/api/v1/twap?pool=0x6c7b79509c47da244def7c87a02816b6c39db61d"
+curl -N localhost:8080/api/v1/stream       # 订阅实时推送
+```
+
+> 使用说明：部署脚本只创建并初始化池子，不添加流动性。报价和交易构造需要池子里有流动性，可通过 `Manager.mint` 添加（调用前先 `approve` Manager）。套利扫描需要另行部署 `FlashArbitrage`（构造参数为 Factory 地址）并配置 `FLASH_ARB_ADDRESS`。不配置任何环境变量直接 `go run main.go` 时，索引器使用模拟源，服务同样可以启动。
+
+### 构建子图
+
+```bash
+cd subgraph
+npm install
+npm run abis       # 从 contracts/artifacts 提取 Factory 和 Pool 的 ABI（需先编译合约）
+npm run codegen    # 由 schema 和 ABI 生成 AssemblyScript 类型
+npm run build      # 编译成 WASM
+```
+
+构建产物部署到自行运行的 graph-node 上即可查询（见第 13 节）。
+
+### 环境变量
+
+**后端**（`backend/main.go`）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `RPC_URL` | 空 | 以太坊节点 RPC 地址。未配置或连不上时索引器使用模拟源 |
+| `FACTORY_ADDRESS` | 空 | Factory 合约地址，用于发现池子（只采信它发出的 `PoolCreated`）。未配置时索引器使用模拟源 |
+| `START_BLOCK` | `0` | 开始索引的区块号 |
+| `CONFIRMATION_BLOCKS` | `12` | 交易最终确认所需的区块数；Reorg 回滚窗口为它的 2 倍 |
+| `CHAIN_ID` | `31337` | 未连接节点时 EIP-712 域使用的链 ID；连上节点后以节点返回的为准 |
+| `MANAGER_ADDRESS` | 空 | UniGoManager 地址：待签名交易的目标，也是 EIP-712 的 `verifyingContract`。未配置时 `/api/v1/swap/build` 返回 503 |
+| `QUOTER_ADDRESS` | 空 | UniGoQuoter 地址。配置后对链下报价做链上一致性抽检 |
+| `FLASH_ARB_ADDRESS` | 空 | FlashArbitrage 地址，填充套利机会响应里的 `to` |
+| `WETH_ADDRESS` | 空 | WETH 地址，用于把 gas 成本折算成借入 token |
+| `TWAP_WINDOW` | `600` | TWAP 窗口（秒） |
+| `PORT` | `8080` | HTTP 监听端口 |
+
+**合约测试**：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `REPORT_GAS` | 未设置 | 设置后打印 Gas 基准表并启用 hardhat-gas-reporter |
+| `INVARIANT_SEED` | `42` | 不变量随机测试的种子 |
+| `INVARIANT_STEPS` | `300` | 不变量随机测试的步数 |
+
 ### API 端点
+
+以 `backend/api/server.go` 注册的路由为准。数量一律用十进制字符串传递，避免 JSON 精度丢失。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/quote?token_in=&token_out=&amount_in=` | 获取报价（Singleflight 防击穿） |
-| POST | `/api/v1/swap` | 提交交易（含 EIP-712 签名验证） |
-| GET | `/api/v1/pools` | 所有池子信息 |
-| GET | `/api/v1/status` | 系统状态（路由/索引器/缓存统计） |
+| GET | `/api/v1/quote?token_in=&token_out=&amount_in=[&slippage=]` | 报价：最优路径、产出、价格冲击、推荐滑点与 `min_amount_out`、Gas 成本、价格安全警告 |
+| POST | `/api/v1/swap/build` | 把路由编码成 Manager 的调用数据，返回待签名交易。body：`token_in` `token_out` `recipient`，`amount_in` 与 `amount_out` 二选一，可选 `slippage` `deadline` `from` |
+| POST | `/api/v1/swap` | 提交交易：EIP-712 验签 + 价格安全检查 + MEV 检查；带 `raw_tx` 时广播并返回交易哈希 |
+| GET | `/api/v1/nonce/{address}` | EIP-712 签名用的 nonce |
+| GET | `/api/v1/tx/{hash}` | 交易状态：`pending` / `pending_confirmation` / `confirmed` / `reverted` |
+| GET | `/api/v1/pools` | 所有池子的价格、tick、活跃流动性 |
+| GET | `/api/v1/klines?pool=[&interval=1m][&limit=100]` | K 线，周期 `1m` `5m` `15m` `1h` `4h` `1d`，`limit` 最大 1000 |
+| GET | `/api/v1/trades?pool=[&limit=50]` | 最近成交，最新的在前 |
+| GET | `/api/v1/twap?pool=` | 池子的 TWAP、现价与偏离（`ok` / `deviated` / `unavailable`） |
+| GET | `/api/v1/mev/alerts[?limit=100]` | 三明治攻击告警，最新的在前 |
+| GET | `/api/v1/arbitrage/opportunities` | 当前套利机会与调用数据，净利润高的在前 |
+| GET | `/api/v1/stream[?types=trade,kline,mev_alert,arbitrage]` | SSE 实时推送 |
+| GET | `/api/v1/status` | 系统状态（索引器进度、Reorg 次数、路由统计） |
+| GET | `/metrics` | Prometheus 文本格式指标（含 P50 / P95 / P99） |
 | GET | `/health` | 健康检查 |
-| GET | `/metrics` | Prometheus 指标（P50/P95/P99） |
-| GET | `/ws/prices` | SSE 实时价格推送 |
+
+`/api/v1/tx/{hash}` 和 `/api/v1/twap` 需要已连接节点，否则返回 503。
 
 ---
 
@@ -2704,93 +2950,148 @@ cd contracts && npx hardhat run scripts/deploy.js --network localhost
 
 ```
 UniGo-DEX/
-├── contracts/                              # Solidity 智能合约层
+├── contracts/                              # Solidity 智能合约层（Hardhat）
 │   ├── contracts/
-│   │   ├── UniGoPool.sol                   # 核心流动性池（mint/swap/burn/collect）
+│   │   ├── UniGoPool.sol                   # 核心流动性池（mint/burn/collect/swap/flash/observe）
 │   │   ├── UniGoFactory.sol                # 池工厂（CREATE2 确定性部署）
-│   │   ├── UniGoManager.sol                # 用户交互管理器（回调处理）
-│   │   ├── UniGoQuoter.sol                 # 链上报价（revert-catch 模拟）
+│   │   ├── UniGoManager.sol                # 用户入口（期限/滑点保护、多跳、精确输出、Pool 真伪校验）
+│   │   ├── UniGoQuoter.sol                 # 链上报价（revert-catch 模拟，单跳 + 多跳）
+│   │   ├── FlashArbitrage.sol              # 闪电贷套利（借 → 卖 → 买回 → 还）
 │   │   ├── interfaces/
-│   │   │   ├── IUniGoPool.sol              # Pool 接口
+│   │   │   ├── IUniGoPool.sol              # Pool 接口与事件
 │   │   │   ├── IUniGoFactory.sol           # Factory 接口
-│   │   │   └── IUniGoPoolCallbacks.sol     # mint/swap 回调接口
-│   │   ├── lib/                            # 数学库（10 个）
+│   │   │   └── IUniGoPoolCallbacks.sol     # mint/swap/flash 回调接口
+│   │   ├── lib/                            # 库（11 个）
 │   │   │   ├── Math.sol                    # 512 位 mulDiv（牛顿法模逆）
 │   │   │   ├── TickMath.sol                # tick ↔ sqrtPrice（查表法）
 │   │   │   ├── SqrtPriceMath.sol           # 基于价格计算 token 数量
 │   │   │   ├── SwapMath.sol                # 单步 swap 计算
 │   │   │   ├── TickBitmap.sol              # O(1) tick 查找（位图）
 │   │   │   ├── BitMath.sol                 # MSB/LSB 位运算
-│   │   │   ├── Tick.sol                    # tick 状态（update/cross）
-│   │   │   ├── Position.sol                # position 状态
+│   │   │   ├── Tick.sol                    # tick 状态、手续费外侧累计值、单 tick 流动性上限
+│   │   │   ├── Position.sol                # position 状态与手续费结算
+│   │   │   ├── Oracle.sol                  # TWAP 观测环形数组（二分 + 插值）
 │   │   │   ├── LiquidityMath.sol           # 流动性加减
 │   │   │   └── FixedPoint96.sol            # Q64.96 常量
-│   │   └── test/
-│   │       └── TestERC20.sol               # 测试用 ERC20
-│   ├── test/
-│   │   ├── UniGoPool.test.js               # Pool 测试（4 个用例）
-│   │   └── UniGoFactory.test.js            # Factory 测试（10 个用例）
+│   │   └── test/                           # 仅测试使用的合约（8 个）
+│   │       ├── TestERC20.sol               # 标准测试代币
+│   │       ├── TestNoReturnERC20.sol       # 没有返回值的代币（USDT 式）
+│   │       ├── TestFalseReturnERC20.sol    # 失败时返回 false 的代币
+│   │       ├── TestFlashBorrower.sol       # 闪电贷借款人
+│   │       ├── TestFakePool.sol            # 伪造的 Pool（验证 Manager 的真伪校验）
+│   │       ├── TestOracleReader.sol        # 读取 observe 并计算平均 tick
+│   │       ├── TestMathHarness.sol         # 暴露数学库供测试调用
+│   │       └── TestTickHarness.sol         # 暴露 Tick 库供测试调用
+│   ├── test/                               # 109 个用例
+│   │   ├── UniGoPool.test.js               # Pool：流动性、swap、手续费、闪电贷（24）
+│   │   ├── UniGoManager.test.js            # Manager：多跳、精确输出、报价、真伪校验（18）
+│   │   ├── Security.test.js                # 安全回归（15）
+│   │   ├── Math.test.js                    # 数学库对照（13）
+│   │   ├── Oracle.test.js                  # TWAP 预言机（12）
+│   │   ├── FlashArbitrage.test.js          # 闪电贷套利（10）
+│   │   ├── UniGoFactory.test.js            # Factory（10）
+│   │   ├── Gas.test.js                     # Gas 基准（6）
+│   │   ├── Invariants.test.js              # 固定种子的不变量随机测试（1）
+│   │   └── helpers.js                      # 部署、建池、路径编码等公共函数
 │   ├── scripts/
 │   │   └── deploy.js                       # 部署脚本
 │   ├── hardhat.config.js
 │   └── package.json
 │
-├── backend/                                # Go 后端（12 个模块）
-│   ├── main.go                             # 入口 + 模块编排 + 优雅关闭
+├── backend/                                # Go 后端（module unigo-dex）
+│   ├── main.go                             # 入口 + 模块装配 + 优雅关闭
 │   │
-│   ├── math/                               # 链下数学库（链上链下 bit-exact 一致）
+│   ├── math/                               # 链下数学库（与链上逐位一致）
 │   │   ├── tickmath.go                     # tick ↔ sqrtPrice（20 魔数查表法）
 │   │   ├── sqrtpricemath.go                # token 数量计算 + ComputeSwapStep
 │   │   ├── constants.go                    # Q96, MIN/MAX_TICK, FeeToTickSpacing
-│   │   └── tickmath_test.go                # 已知值验证 + 往返测试
+│   │   └── tickmath_test.go
 │   │
-│   ├── router/                             # 智能路由引擎
-│   │   ├── router.go                       # BFS + 200ms 超时 + 二级降级 + sync.Pool
-│   │   └── quote.go                        # 链下 swap 模拟（SimulateSwap）
+│   ├── chain/                              # 基于 go-ethereum 的链交互层
+│   │   ├── client.go                       # 区块 / 日志 / 回执 / 广播 / 费用，RPC 经断路器
+│   │   ├── contracts.go                    # slot0 / TWAP / Quoter 读调用 + 调用数据编码
+│   │   ├── events.go                       # 事件解码（签名取自内嵌 ABI）
+│   │   ├── contractabi/                    # 内嵌 ABI
+│   │   │   ├── contractabi.go              # go:embed + 解析
+│   │   │   ├── gen.go                      # go generate：从 Hardhat 编译产物提取 ABI
+│   │   │   └── *.json                      # Pool / Factory / Manager / Quoter / FlashArbitrage
+│   │   └── *_test.go                       # 在 go-ethereum 模拟后端上测试
 │   │
 │   ├── indexer/                            # 事件索引器
-│   │   ├── indexer.go                      # 区块轮询 + parentHash Reorg 检测 + 回滚
-│   │   ├── events.go                       # Mint/Burn/Swap/Collect 事件类型
-│   │   └── pool_state.go                   # PoolState + PoolStateManager + Snapshot
+│   │   ├── indexer.go                      # ChainSource 接口 + 轮询 + Reorg 检测 + 撤销日志回滚
+│   │   ├── pool_state.go                   # PoolState + PoolStateManager + Snapshot
+│   │   ├── events.go                       # 事件结构体
+│   │   └── sim_source.go                   # 未配置节点时的模拟数据源
+│   │
+│   ├── router/                             # 智能路由引擎
+│   │   ├── quote.go                        # 逐 tick 精确的链下 swap 模拟（SimulateSwap）
+│   │   └── router.go                       # 路径枚举 + 并发评估 + 200ms 超时 + 二级降级
+│   │
+│   ├── oracle/                             # 价格安全
+│   │   └── oracle.go                       # 现价 / TWAP / Chainlink 三方交叉校验 + 保护模式
+│   │
+│   ├── eip712/                             # 签名验证
+│   │   └── eip712.go                       # EIP-712 摘要 + ecrecover + 三层防重放
+│   │
+│   ├── gas/                                # Gas 成本评估
+│   │   └── gas.go                          # EIP-1559：baseFee + priorityFee，取不到时退回静态值
+│   │
+│   ├── kline/                              # 行情
+│   │   └── kline.go                        # 六周期 K 线 + 逐笔成交 + Reorg 重算
+│   │
+│   ├── mev/                                # MEV 防御
+│   │   └── mev.go                          # 三明治检测 + 价格冲击 / 滑点 / deadline 检查
+│   │
+│   ├── arb/                                # 套利
+│   │   └── arb.go                          # 跨池套利扫描 + 三分搜索最优借入量
+│   │
+│   ├── ws/                                 # 实时推送
+│   │   └── ws.go                           # Hub 发布-订阅 + SSE + 慢客户端断开
 │   │
 │   ├── cache/                              # 缓存层
 │   │   └── cache.go                        # Singleflight 请求合并 + TTL + Warmup 预热
 │   │
-│   ├── oracle/                             # 价格预言机验证
-│   │   └── oracle.go                       # Chainlink 过期检测 + 交叉验证 + 保护模式
-│   │
-│   ├── eip712/                             # 签名验证
-│   │   └── eip712.go                       # EIP-712 三层防重放（Deadline+Nonce+Domain）
-│   │
 │   ├── circuitbreaker/                     # 断路器
-│   │   ├── circuitbreaker.go               # 三态状态机（Closed→Open→HalfOpen）
-│   │   └── circuitbreaker_test.go          # 状态转换 + 恢复 + 回调测试
+│   │   └── circuitbreaker.go               # 三态状态机（Closed→Open→HalfOpen）
 │   │
 │   ├── workerpool/                         # Goroutine 池
 │   │   ├── pool.go                         # 固定 Worker + 有界 Channel + 泛型结果
 │   │   └── pool_test.go                    # 功能测试 + Benchmark 对比
 │   │
 │   ├── logging/                            # 结构化日志
-│   │   └── logging.go                      # slog + JSON/Text + TraceID 链路追踪
+│   │   └── logging.go                      # slog + JSON/Text + TraceID
 │   │
 │   ├── metrics/                            # 可观测性指标
 │   │   └── metrics.go                      # Counter/Gauge/Histogram + P99 + /metrics 端点
 │   │
-│   ├── ws/                                 # 实时推送
-│   │   └── ws.go                           # Hub 发布-订阅 + SSE + 慢客户端驱逐
-│   │
 │   ├── api/                                # REST API
-│   │   ├── server.go                       # HTTP 路由 + 端点实现
-│   │   ├── middleware.go                   # Token Bucket 限流 + 信号量并发控制
+│   │   ├── server.go                       # 路由注册 + 报价 / 提交 / 状态 / K 线 / 告警等端点
+│   │   ├── trade.go                        # 价格安全检查、待签名交易构造、TWAP 与套利查询
+│   │   ├── middleware.go                   # Token Bucket 限流 + 信号量并发控制 + 日志 + CORS
 │   │   └── types.go                        # 请求/响应类型定义
+│   │
+│   ├── integration/                        # 端到端集成测试（integration 构建标签）
+│   │   ├── harness_test.go                 # 拉起 Hardhat 节点、部署合约、发交易
+│   │   └── e2e_test.go                     # 11 个全链路场景
 │   │
 │   ├── go.mod
 │   └── go.sum
 │
+├── subgraph/                               # The Graph 子图
+│   ├── schema.graphql                      # Factory / Pool / Swap / Mint / Burn / Flash / Candle
+│   ├── subgraph.yaml                       # 数据源与事件处理器声明
+│   ├── src/
+│   │   ├── factory.ts                      # PoolCreated → 登记池子 + 启动动态数据源
+│   │   └── pool.ts                         # Swap / Mint / Burn / Flash 处理 + 多周期 K 线
+│   ├── abis/                               # Factory 和 Pool 的 ABI
+│   └── package.json
+│
 ├── README.md                               # 本文件
-├── Makefile                                # make compile / test / deploy / run-backend
+├── Makefile                                # make compile / test / test-integration / gas / abi / deploy ...
 └── .gitignore
 ```
+
+代码规模（`wc -l`）：合约 3157 行 Solidity（不含测试合约），合约测试 2768 行；后端 7533 行 Go，后端测试 4910 行（其中集成测试 1452 行）。
 
 ---
 
@@ -2800,6 +3101,9 @@ UniGo-DEX/
 - [Uniswap V3 开发教程 (Jeiwan)](https://uniswapv3book.com/)
 - [Uniswap V3 Core 源码](https://github.com/Uniswap/v3-core)
 - [EIP-712: Typed structured data hashing and signing](https://eips.ethereum.org/EIPS/eip-712)
+- [EIP-1559: Fee market change](https://eips.ethereum.org/EIPS/eip-1559)
+- [go-ethereum 文档](https://geth.ethereum.org/docs)
+- [The Graph 文档](https://thegraph.com/docs/)
 - [Chainlink Price Feeds](https://docs.chain.link/data-feeds)
 - [Go slog 官方文档](https://pkg.go.dev/log/slog)
 - [Circuit Breaker Pattern (Martin Fowler)](https://martinfowler.com/bliki/CircuitBreaker.html)
