@@ -147,6 +147,9 @@ contract FlashArbitrage is IUniGoPoolCallbacks {
             ""
         );
 
+        // 流动性不足时输入吃不完，剩余的 token 会滞留在合约里被后来的调用者拿走，整笔作废
+        require(uint256(zeroForOne ? amount0 : amount1) == amountIn, "PF");
+
         amountOut = uint256(-(zeroForOne ? amount1 : amount0));
     }
 
