@@ -41,6 +41,9 @@ type Backend interface {
 	ethereum.TransactionReader
 	ethereum.TransactionSender
 	ethereum.GasPricer1559
+	ethereum.ContractCaller
+	ethereum.GasEstimator
+	ethereum.ChainIDReader
 }
 
 var (
