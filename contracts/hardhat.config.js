@@ -22,7 +22,8 @@ module.exports = {
       allowUnlimitedContractSize: true,
     },
     localhost: {
-      url: "http://127.0.0.1:8545",
+      // 默认连本机 8545；端口被占用时可以用 RPC_URL 指向别的本地节点
+      url: process.env.RPC_URL || "http://127.0.0.1:8545",
     },
   },
 };
