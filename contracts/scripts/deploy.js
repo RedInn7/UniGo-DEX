@@ -27,8 +27,6 @@ const Q192 = 2n ** 192n;
 const DEADLINE = 4102444800n; // 2100 年
 // 每个账户铸造的代币数量
 const SUPPLY = ethers.parseEther("1000000000000");
-// 宽区间的流动性；窄区间和单边区间按倍数叠加
-const BASE_LIQUIDITY = 10n ** 24n;
 
 // BigInt 整数平方根（向下取整）
 function sqrt(value) {
@@ -83,14 +81,16 @@ async function main() {
     }
   }
 
-  // 3. 池子：price 是 "1 个 base 值多少 quote"
+  // 3. 池子：price 是 "1 个 base 值多少 quote"；liquidity 是宽区间的流动性 L，
+  //    窄区间和单边区间按倍数叠加。同样的资金量，价格越接近 1 需要的 L 越大，
+  //    所以稳定币对给得多一些，各池子当前价 ±10% 内的深度都在百万美元量级
   const poolSpecs = [
-    { base: "WETH", quote: "USDC", fee: 500, price: 2000n },
-    { base: "WETH", quote: "USDC", fee: 3000, price: 2000n },
-    { base: "USDC", quote: "DAI", fee: 500, price: 1n },
-    { base: "USDC", quote: "DAI", fee: 3000, price: 1n },
-    { base: "WBTC", quote: "DAI", fee: 3000, price: 60000n },
-    { base: "WBTC", quote: "DAI", fee: 10000, price: 60000n },
+    { base: "WETH", quote: "USDC", fee: 500, price: 2000n, liquidity: 5n * 10n ** 24n },
+    { base: "WETH", quote: "USDC", fee: 3000, price: 2000n, liquidity: 5n * 10n ** 24n },
+    { base: "USDC", quote: "DAI", fee: 500, price: 1n, liquidity: 10n ** 26n },
+    { base: "USDC", quote: "DAI", fee: 3000, price: 1n, liquidity: 10n ** 26n },
+    { base: "WBTC", quote: "DAI", fee: 3000, price: 60000n, liquidity: 10n ** 24n },
+    { base: "WBTC", quote: "DAI", fee: 10000, price: 60000n, liquidity: 10n ** 24n },
   ];
   const pools = [];
   for (const spec of poolSpecs) {
@@ -111,10 +111,10 @@ async function main() {
     const spacing = Number(await pool.tickSpacing());
     const center = align(tick, spacing);
     const positions = [
-      [center - 100 * spacing, center + 100 * spacing, BASE_LIQUIDITY],
-      [center - 10 * spacing, center + 10 * spacing, BASE_LIQUIDITY * 4n],
-      [center + 2 * spacing, center + 30 * spacing, BASE_LIQUIDITY * 2n],
-      [center - 30 * spacing, center - 2 * spacing, BASE_LIQUIDITY * 2n],
+      [center - 100 * spacing, center + 100 * spacing, spec.liquidity],
+      [center - 10 * spacing, center + 10 * spacing, spec.liquidity * 4n],
+      [center + 2 * spacing, center + 30 * spacing, spec.liquidity * 2n],
+      [center - 30 * spacing, center - 2 * spacing, spec.liquidity * 2n],
     ];
     for (const [tickLower, tickUpper, amount] of positions) {
       await (

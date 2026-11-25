@@ -1,0 +1,11 @@
+{"bench":"chase","blocks":713,"blocks_per_s":2102.9002970846586,"events":3102,"events_per_s":9148.943508494547,"run":1,"seconds":0.339055542}
+{"bench":"chase","blocks":713,"blocks_per_s":2298.6878274217656,"events":3102,"events_per_s":10000.742834028495,"run":2,"seconds":0.310176959}
+{"bench":"chase","blocks":713,"blocks_per_s":2415.144278381954,"events":3102,"events_per_s":10507.401895569174,"run":3,"seconds":0.295220458}
+{"bench":"chase","blocks":713,"blocks_per_s":2324.4893046465318,"events":3102,"events_per_s":10112.995544198515,"run":4,"seconds":0.306734042}
+{"bench":"chase","blocks":713,"blocks_per_s":2407.525794621363,"events":3102,"events_per_s":10474.256682910893,"run":5,"seconds":0.296154667}
+{"bench":"chase","blocks":713,"blocks_per_s":2403.9977896572136,"events":3102,"events_per_s":10458.907634665744,"run":6,"seconds":0.296589291}
+{"bench":"reorg","blocks_reindexed":11,"depth":10,"events_reindexed":22,"ms":7.832,"run":1}
+{"bench":"reorg","blocks_reindexed":11,"depth":10,"events_reindexed":22,"ms":10.122,"run":2}
+{"bench":"reorg","blocks_reindexed":11,"depth":10,"events_reindexed":22,"ms":8.963,"run":3}
+{"bench":"reorg","blocks_reindexed":11,"depth":10,"events_reindexed":22,"ms":7.933,"run":4}
+{"bench":"reorg","blocks_reindexed":11,"depth":10,"events_reindexed":22,"ms":9.114,"run":5}
