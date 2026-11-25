@@ -2,10 +2,7 @@ module unigo-dex
 
 go 1.24.0
 
-require (
-	github.com/ethereum/go-ethereum v1.17.3
-	golang.org/x/crypto v0.47.0
-)
+require github.com/ethereum/go-ethereum v1.17.3
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
@@ -85,6 +82,7 @@ require (
 	go.opentelemetry.io/otel v1.40.0 // indirect
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
+	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
