@@ -1,8 +1,8 @@
 # UniGo-DEX
 
-基于 Uniswap V3 集中流动性设计的去中心化交易所全栈实现（Solidity + Go）。
+基于 Uniswap V3 集中流动性设计的去中心化交易所全栈实现（Solidity + Go + The Graph）。
 
-本项目不是一个"调 SDK 跑 Demo"的教程，而是从底层数学库到生产级系统设计的完整实现。涵盖链上合约（10 个数学库 + 4 个核心合约）、链下 Go 后端（12 个模块），以及真实系统中的工程挑战与解决方案。
+本项目不是一个"调 SDK 跑 Demo"的教程，而是从底层数学库到生产级系统设计的完整实现。涵盖链上合约（5 个核心合约 + 11 个库）、链下 Go 后端（18 个包，通过 go-ethereum 连接真实节点）、The Graph 子图，以及把三者接在一起验证的端到端测试。
 
 ---
 
@@ -18,21 +18,36 @@
   - [4. 回调模式与安全性](#4-回调模式与安全性)
   - [5. CREATE2 确定性部署](#5-create2-确定性部署)
   - [6. Quoter 的 revert-catch 模拟执行](#6-quoter-的-revert-catch-模拟执行)
+  - [7. 手续费累计与按 position 领取](#7-手续费累计与按-position-领取)
+  - [8. 闪电贷（Flash）](#8-闪电贷flash)
+  - [9. Manager：期限与滑点保护、多跳路径、精确输出](#9-manager期限与滑点保护多跳路径精确输出)
+  - [10. TWAP 预言机（观测环形数组）](#10-twap-预言机观测环形数组)
+  - [11. 闪电贷套利合约（FlashArbitrage）](#11-闪电贷套利合约flasharbitrage)
+  - [12. 安全加固：tick 流动性上限与 SafeERC20](#12-安全加固tick-流动性上限与-safeerc20)
+  - [13. The Graph 子图与多周期 K 线](#13-the-graph-子图与多周期-k-线)
 - **Go 后端 — 核心业务**
-  - [7. 链下数学库（链上链下一致性）](#7-链下数学库链上链下一致性)
-  - [8. Smart Order Router（二级降级）](#8-smart-order-router二级降级)
-  - [9. 事件索引器与 Reorg 回滚](#9-事件索引器与-reorg-回滚)
-  - [10. 缓存 Singleflight 防击穿](#10-缓存-singleflight-防击穿)
-  - [11. Chainlink 预言机验证与保护模式](#11-chainlink-预言机验证与保护模式)
-  - [12. EIP-712 签名与三层防重放](#12-eip-712-签名与三层防重放)
+  - [14. 链下数学库（链上链下一致性）](#14-链下数学库链上链下一致性)
+  - [15. chain 包：基于 go-ethereum 的链交互层](#15-chain-包基于-go-ethereum-的链交互层)
+  - [16. 事件索引器：链数据源接口与 Reorg 回滚](#16-事件索引器链数据源接口与-reorg-回滚)
+  - [17. 链下 swap 模拟与 Smart Order Router](#17-链下-swap-模拟与-smart-order-router)
+  - [18. 缓存 Singleflight 防击穿](#18-缓存-singleflight-防击穿)
+  - [19. 价格安全：现价 / TWAP / Chainlink 三方交叉校验](#19-价格安全现价--twap--chainlink-三方交叉校验)
+  - [20. 待签名交易构造与交易状态查询](#20-待签名交易构造与交易状态查询)
+  - [21. EIP-712 签名与三层防重放](#21-eip-712-签名与三层防重放)
+  - [22. EIP-1559 Gas 成本评估](#22-eip-1559-gas-成本评估)
+- **Go 后端 — 行情与 MEV**
+  - [23. K 线与成交记录（Reorg 重算）](#23-k-线与成交记录reorg-重算)
+  - [24. 三明治攻击检测与交易前保护](#24-三明治攻击检测与交易前保护)
+  - [25. 套利机会扫描（三分搜索最优借入量）](#25-套利机会扫描三分搜索最优借入量)
+  - [26. SSE 实时推送](#26-sse-实时推送)
 - **Go 后端 — 工程基础设施**
-  - [13. 断路器（Circuit Breaker）](#13-断路器circuit-breaker)
-  - [14. Goroutine 池与性能优化](#14-goroutine-池与性能优化)
-  - [15. 结构化日志与链路追踪](#15-结构化日志与链路追踪)
-  - [16. Prometheus 风格可观测性指标](#16-prometheus-风格可观测性指标)
-  - [17. WebSocket/SSE 实时推送](#17-websocketsse-实时推送)
-  - [18. API 限流与背压控制](#18-api-限流与背压控制)
-  - [19. 优雅关闭与生命周期管理](#19-优雅关闭与生命周期管理)
+  - [27. 断路器（Circuit Breaker）](#27-断路器circuit-breaker)
+  - [28. Goroutine 池与性能优化](#28-goroutine-池与性能优化)
+  - [29. 结构化日志与链路追踪](#29-结构化日志与链路追踪)
+  - [30. Prometheus 风格可观测性指标](#30-prometheus-风格可观测性指标)
+  - [31. API 限流与背压控制](#31-api-限流与背压控制)
+  - [32. 优雅关闭与生命周期管理](#32-优雅关闭与生命周期管理)
+- [测试体系](#测试体系)
 - [Benchmark 性能对比](#benchmark-性能对比)
 - [快速开始](#快速开始)
 - [项目结构](#项目结构)
@@ -46,73 +61,97 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 
 ### 为什么做这个项目？
 
-1. **深度理解 AMM 数学**：不是调 SDK，而是从 `mulDiv` 全精度乘除到 `TickMath` 查表法完整实现
-2. **链上链下协同**：Go 后端精确复现 Solidity 数学库，使用 `math/big` 实现零 Gas 链下报价，tick 值与链上 bit-exact 一致
-3. **生产级系统设计**：考虑了 Reorg 回滚、缓存雪崩、路由降级、断路器、背压控制等真实生产环境中的问题
-4. **Go 工程实践**：Goroutine 池化与 Benchmark 对比、slog 结构化日志、Prometheus 指标、SSE 实时推送、Token Bucket 限流
+1. **深度理解 AMM 数学**：不是调 SDK，而是从 `mulDiv` 全精度乘除到 `TickMath` 查表法完整实现，再到手续费累计、TWAP 预言机、闪电贷
+2. **链上链下逐位一致**：Go 后端用 `math/big` 复现 Solidity 数学库，并逐 tick 模拟 swap；集成测试在真实节点上把链下报价与链上 Quoter 的返回值逐位比对
+3. **真实的链交互**：基于 go-ethereum 索引事件、处理 Reorg、读取 TWAP、构造待签名交易、广播并跟踪确认，后端不托管私钥
+4. **DeFi 安全**：现价 / TWAP / Chainlink 三方交叉校验拒绝被操纵的价格，三明治攻击检测，EIP-712 验签防重放，合约侧的 tick 流动性上限与 SafeERC20
+5. **生产级系统设计**：Reorg 回滚、缓存击穿、路由降级、断路器、背压控制、慢客户端隔离等真实环境中的问题
+6. **Go 工程实践**：Goroutine 池化与 Benchmark 对比、slog 结构化日志、Prometheus 指标、SSE 实时推送、Token Bucket 限流
 
 ### 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 智能合约 | Solidity 0.8.20, Hardhat, OpenZeppelin |
-| 后端语言 | Go 1.21+, 纯标准库（零外部框架依赖） |
+| 智能合约 | Solidity 0.8.20（optimizer + viaIR）, Hardhat, OpenZeppelin（IERC20 / SafeERC20） |
+| 后端语言 | Go 1.24+，HTTP 层用标准库 `net/http` |
+| 链交互 | go-ethereum v1.17.3（ethclient、ABI 编解码、secp256k1、模拟后端） |
+| 数据索引 | The Graph 子图（AssemblyScript），后端内置事件索引器 |
 | 数学精度 | Q64.96 定点数, 512 位中间精度, math/big |
 | 可观测性 | slog 结构化日志, Prometheus 文本格式指标 |
 | 实时通信 | Server-Sent Events (SSE) |
-| 密码学 | keccak256, EIP-712, ECDSA |
+| 密码学 | keccak256, EIP-712, ECDSA（secp256k1 签名恢复） |
+| 测试 | Hardhat + Chai（109 个合约用例）, go test（80 个单元测试）, 自起节点的端到端集成测试 |
 
 ---
 
 ## 系统架构
 
 ```
-                          ┌─────────────────┐
-                          │   用户 / 前端     │
-                          └────────┬────────┘
-                                   │ HTTP / SSE
-            ┌──────────────────────▼──────────────────────┐
-            │                 API Server                   │
-            │  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
-            │  │ 限流中间件 │ │ 背压控制  │ │ CORS / Log  │ │
-            │  │TokenBucket│ │Semaphore │ │ TraceID注入  │ │
-            │  └──────────┘ └──────────┘ └──────────────┘ │
-            └─────┬──────────────┬──────────────┬─────────┘
-                  │              │              │
-         ┌────────▼───┐  ┌──────▼──────┐  ┌───▼────────┐
-         │  Cache      │  │  Router     │  │  Oracle    │
-         │ Singleflight│  │ BFS + 降级   │  │ Chainlink  │
-         │ + Warmup    │  │ Worker Pool │  │ 交叉验证    │
-         └──────┬──────┘  └──────┬──────┘  └────────────┘
-                │                │
-     ┌──────────▼─────────┐     │     ┌─────────────────┐
-     │   Circuit Breaker  │     │     │   Worker Pool    │
-     │   RPC 熔断保护      │     │     │  Goroutine 池化  │
-     └──────────┬─────────┘     │     └─────────────────┘
-                │               │
-     ┌──────────▼───────────────▼──────────────────────┐
-     │              PoolStateManager                    │
-     │  （链下状态镜像 — 事件驱动状态重建）                │
-     └──────────────────────┬──────────────────────────┘
-                            │ 事件回放
-     ┌──────────────────────▼──────────────────────────┐
-     │              Event Indexer                       │
-     │   区块轮询 → 事件解析 → Reorg 检测 + 状态回滚      │
-     └──────────────────────┬──────────────────────────┘
-                            │ JSON-RPC / WebSocket
-     ┌──────────────────────▼──────────────────────────┐
-     │                Ethereum Node                     │
-     │  ┌────────────┐ ┌──────────────┐ ┌────────────┐ │
-     │  │ UniGoPool   │ │ UniGoFactory │ │ UniGoQuoter│ │
-     │  └────────────┘ └──────────────┘ └────────────┘ │
-     └─────────────────────────────────────────────────┘
+                              用户 / 前端 / 钱包
+          │ HTTP 请求、SSE 订阅                 ▲ 待签名交易（钱包签名后经 /swap 回传 raw_tx）
+          ▼                                    │
+┌─ API Server（backend/api） ──────────────────────────────────────────────────────────────────┐
+│ 中间件链：CORS → Logging → 每 IP 限流（Token Bucket）→ 全局并发信号量（503 背压）            │
+│ 报价 /quote · 构造 /swap/build · 提交 /swap · 状态 /tx · 行情 /klines /trades /twap          │
+│ 告警 /mev/alerts · 套利 /arbitrage/opportunities · 推送 /stream · /status /metrics /health   │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+          │ 请求路径
+          ▼
+┌─ 报价与交易前检查 ───────────────────────────────────────────────────────────────────────────┐
+│ Cache       Singleflight 合并并发请求；key 带区块号，出新块自动失效                          │
+│ Router      DFS 枚举路径 → Worker Pool 并发逐 tick 模拟 → 200ms 超时降级到直连池             │
+│ Oracle      池内现价 / TWAP / Chainlink 三方交叉校验，疑似操纵时拒绝交易                     │
+│ MEV Guard   价格冲击、deadline、min_amount_out 检查，推荐滑点                                │
+│ EIP-712     验签：Deadline + Nonce + Domain Separator                                        │
+│ Gas         EIP-1559 成本评估（baseFee + priorityFee）                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+          │ 读池子快照                               ▲ Swap 事件流（索引协程内同步回调）
+          ▼                                         │
+┌─ PoolStateManager 链下状态镜像 ──────┐      ┌─ Swap 事件订阅者 ──────────────────────────┐
+│ 每个池子的价格 / tick / 活跃流动性   │      │ kline    六周期 K 线 + 逐笔成交            │
+│ 已初始化 tick 的 liquidityNet        │      │ mev      三明治攻击检测                    │
+└──────────────────────────────────────┘      │ arb      跨池套利扫描（三分搜索）          │
+                                              │ oracle   池内现价喂价                      │
+                                              └────────────────────────────────────────────┘
+          ▲ 事件回放 / Reorg 撤销                          │ trade / kline / mev_alert / arbitrage
+          │                                               ▼
+┌─ Indexer 事件索引器 ─────────────────┐      ┌─ SSE Hub ──────────────────────────────────┐
+│ 轮询区块 → 父哈希校验 → 应用事件     │      │ 非阻塞扇出，慢客户端直接断开               │
+│ Reorg：找分叉点 → 逆序执行撤销日志   │      │ → GET /api/v1/stream                       │
+│        → 从分叉点重新索引            │      └────────────────────────────────────────────┘
+└──────────────────────────────────────┘
+          │ ChainSource 接口（未配置节点时为模拟源）
+          ▼
+┌─ chain.Client（go-ethereum） ────────────────────────────────────────────────────────────────┐
+│ ABI 由 Hardhat 编译产物生成并内嵌 · 所有 RPC 调用经断路器                                    │
+│ 区块头 / 日志解码 · eth_call（slot0、observe、Quoter）· 调用数据编码 · 广播 · 回执 · 费用    │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+          │ JSON-RPC
+          ▼
+┌─ Ethereum Node ──────────────────────────────────────────────────────────────────────────────┐
+│                                                                                              │
+│   UniGoFactory ──CREATE2──→ UniGoPool × N     mint / burn / collect / swap / flash           │
+│                              ▲   ▲   ▲        手续费累计 · 观测环形数组（TWAP）              │
+│   UniGoManager ──────────────┘   │   └─────── FlashArbitrage（闪电贷 + 两次 swap）           │
+│   期限 / 滑点 / 多跳 / 精确输出  │                                                           │
+│   UniGoQuoter ───────────────────┘            revert-catch 报价                              │
+│                                                                                              │
+│   事件：PoolCreated · Initialize · Mint · Burn · Collect · Swap · Flash                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+          │ 同一批事件
+          ▼
+┌─ The Graph 子图（subgraph/，运行在 graph-node 上） ──────────────────────────────────────────┐
+│ Factory / Pool / Swap / Mint / Burn / Flash 实体 + 1m / 5m / 1h / 1d K 线 → GraphQL 查询     │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
 
-     横切关注点：
-     ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-     │ Metrics  │ │ Logging  │ │ WS/SSE   │ │ EIP-712  │
-     │ P50/P99  │ │ TraceID  │ │ 价格推送  │ │ 签名验证  │
-     └──────────┘ └──────────┘ └──────────┘ └──────────┘
+横切关注点：Metrics（Counter / Gauge / Histogram，P50 / P95 / P99）· slog 结构化日志
+            断路器（保护 RPC）· Goroutine 池（路径评估）
 ```
+
+**两条主线**：
+
+- **请求路径**（自上而下）：API → 缓存 → 路由引擎在池子快照上逐 tick 模拟 → 价格安全与 MEV 检查 → 编码成 Manager 的调用数据交给用户钱包签名 → 广播 → 跟踪确认
+- **事件路径**（自下而上）：合约事件 → `chain.Client` 解码 → 索引器回放到 `PoolStateManager`（Reorg 时按撤销日志回滚）→ Swap 事件扇出给 K 线、三明治检测、套利扫描、预言机 → SSE 推送给前端；同一批事件也被子图索引成可用 GraphQL 查询的历史数据
 
 ---
 
@@ -120,24 +159,45 @@ UniGo-DEX 是一个教学级别的 DEX 全栈实现，参考 Uniswap V3 的核�
 
 | 分类 | 技术点 | 核心机制 | 代码位置 |
 |------|--------|----------|----------|
-| 合约 | Q64.96 定点数 + 512 位精度 | mulmod + 牛顿法模逆 | `contracts/lib/Math.sol` |
-| 合约 | Tick 位图 O(1) 查找 | 256-bit word + MSB/LSB | `contracts/lib/TickBitmap.sol` |
-| 合约 | 查表法 tick↔price 转换 | 20 个预计算魔数常量 | `contracts/lib/TickMath.sol` |
-| 合约 | 回调模式安全转账 | mint/swap callback + 余额校验 | `contracts/UniGoPool.sol` |
-| 合约 | CREATE2 确定性部署 | salt = keccak256(token0, token1, fee) | `contracts/UniGoFactory.sol` |
-| 合约 | revert-catch 模拟执行 | 故意 revert 携带结果数据 | `contracts/UniGoQuoter.sol` |
-| 后端 | 链下数学精确复现 | math/big + 相同魔数常量 | `backend/math/` |
-| 后端 | BFS 路由 + 200ms 超时降级 | context.WithTimeout + fallback | `backend/router/router.go` |
-| 后端 | Reorg 检测 + 状态回滚 | parentHash 校验 + RollbackToBlock | `backend/indexer/indexer.go` |
-| 后端 | Singleflight 防缓存击穿 | sync.WaitGroup 请求合并 | `backend/cache/cache.go` |
-| 后端 | Chainlink 验证 + 保护模式 | 过期检测 + 交叉偏离检测 | `backend/oracle/oracle.go` |
-| 后端 | EIP-712 三层防重放 | Deadline + Nonce + DomainSeparator | `backend/eip712/eip712.go` |
+| 合约 | Q64.96 定点数 + 512 位精度 | mulmod + 牛顿法模逆 | `contracts/contracts/lib/Math.sol` |
+| 合约 | Tick 位图 O(1) 查找 | 256-bit word + MSB/LSB | `contracts/contracts/lib/TickBitmap.sol` |
+| 合约 | 查表法 tick↔price 转换 | 20 个预计算魔数常量 | `contracts/contracts/lib/TickMath.sol` |
+| 合约 | 回调模式安全转账 | mint/swap/flash callback + 余额校验 + 重入锁 | `contracts/contracts/UniGoPool.sol` |
+| 合约 | CREATE2 确定性部署 | salt = keccak256(token0, token1, fee) | `contracts/contracts/UniGoFactory.sol` |
+| 合约 | revert-catch 模拟执行 | 自定义错误携带结果 + 多跳报价 | `contracts/contracts/UniGoQuoter.sol` |
+| 合约 | 手续费累计与按 position 领取 | feeGrowthGlobal + tick 外侧累计值翻转 + 做差结算 | `contracts/contracts/lib/Tick.sol`, `Position.sol` |
+| 合约 | 闪电贷 | 先转出、回调、验余额；手续费归 LP | `contracts/contracts/UniGoPool.sol`（`flash`） |
+| 合约 | 期限与滑点保护 | deadline + amountOutMinimum / amountInMaximum | `contracts/contracts/UniGoManager.sol` |
+| 合约 | 多跳 exactInput / exactOutputSingle | 紧凑路径编码（20 + 23n 字节）+ Manager 中转 | `contracts/contracts/UniGoManager.sol` |
+| 合约 | Pool 真伪校验 | 入口和回调都经 Factory 反查 | `contracts/contracts/UniGoManager.sol` |
+| 合约 | TWAP 预言机 | 观测环形数组 + 二分查找 + 线性插值 | `contracts/contracts/lib/Oracle.sol` |
+| 合约 | 闪电贷套利 | 第三个池子放贷 + 两次 swap + minProfit | `contracts/contracts/FlashArbitrage.sol` |
+| 合约 | tick 流动性上限 | uint128 容量按 tick 数均分 + 受检运算 | `contracts/contracts/lib/Tick.sol` |
+| 合约 | 兼容不规范代币 | SafeERC20 | `contracts/contracts/UniGoPool.sol`, `UniGoManager.sol` |
+| 子图 | 事件索引 + 多周期 K 线 | 动态数据源 + 1m/5m/1h/1d Candle 实体 | `subgraph/src/pool.ts`, `subgraph/schema.graphql` |
+| 后端 | 链下数学精确复现 | math/big + 相同魔数常量和取整方向 | `backend/math/` |
+| 后端 | 链交互层 | go-ethereum + 由编译产物生成并内嵌的 ABI | `backend/chain/`, `backend/chain/contractabi/` |
+| 后端 | 链数据源接口 | ChainSource：真实节点 / 模拟源可替换 | `backend/indexer/indexer.go` |
+| 后端 | Reorg 检测 + 状态回滚 | parentHash 校验 + 找分叉点 + 撤销日志逆序回放 | `backend/indexer/indexer.go` |
+| 后端 | 逐 tick 精确的链下 swap 模拟 | 复现 swap 主循环，在相同的 word 边界切步 | `backend/router/quote.go` |
+| 后端 | 路由搜索 + 200ms 超时降级 | DFS 枚举 + Worker Pool 并发评估 + 直连池 fallback | `backend/router/router.go` |
+| 后端 | Singleflight 防缓存击穿 | sync.WaitGroup 请求合并 + 按区块号失效 | `backend/cache/cache.go` |
+| 后端 | 三方价格交叉校验 | 现价 / TWAP / Chainlink + 操纵拒绝 + 保护模式 | `backend/oracle/oracle.go`, `backend/api/trade.go` |
+| 后端 | 待签名交易构造 | 路由 → Manager 调用数据 + 链上报价抽检 | `backend/api/trade.go`, `backend/chain/contracts.go` |
+| 后端 | 交易状态查询 | 回执 + 确认数：pending → confirmed / reverted | `backend/chain/client.go` |
+| 后端 | EIP-712 三层防重放 | Deadline + Nonce + DomainSeparator，拒绝高 s 签名 | `backend/eip712/eip712.go` |
+| 后端 | EIP-1559 Gas 成本评估 | baseFee + priorityFee，静态值兜底 | `backend/gas/gas.go` |
+| 后端 | K 线与成交 | 六周期聚合 + Reorg 重算 | `backend/kline/kline.go` |
+| 后端 | 三明治攻击检测 | 同块同池：抢跑 → 受害者同向 → 反向平仓 | `backend/mev/mev.go` |
+| 后端 | 套利机会扫描 | 逐 tick 模拟的利润函数 + 三分搜索最优借入量 | `backend/arb/arb.go` |
+| 后端 | SSE 实时推送 | Hub 发布-订阅 + 非阻塞扇出 + 慢客户端断开 | `backend/ws/ws.go` |
 | 后端 | 断路器（三态状态机） | Closed→Open→HalfOpen + 探测恢复 | `backend/circuitbreaker/` |
 | 后端 | Goroutine 池化 | 固定 Worker + 有界 Channel 复用 | `backend/workerpool/pool.go` |
-| 后端 | 结构化日志 + 链路追踪 | slog + context TraceID 传播 | `backend/logging/logging.go` |
+| 后端 | 结构化日志 | slog + context TraceID | `backend/logging/logging.go` |
 | 后端 | Prometheus 风格指标 | Counter/Gauge/Histogram + P99 | `backend/metrics/metrics.go` |
-| 后端 | SSE 实时价格推送 | Hub 发布-订阅 + 慢客户端驱逐 | `backend/ws/ws.go` |
 | 后端 | Token Bucket + 并发信号量 | 每 IP 限流 + 全局 503 背压 | `backend/api/middleware.go` |
+| 测试 | 不变量随机测试 | 固定种子 300 步随机操作，每步检查 4 条不变量 | `contracts/test/Invariants.test.js` |
+| 测试 | 端到端集成测试 | 自起 Hardhat 节点，11 个全链路场景 | `backend/integration/` |
 
 ---
 
@@ -1538,7 +1598,7 @@ TWAP 读数也用同样的方式缓存（key 为 `twap:{池子}:{区块号}`）�
 
 **现价 vs TWAP：操纵拒绝**
 
-每次报价、构造交易、提交交易，都会对路由经过的每个池子读一次链上 TWAP（`chain.Client.TWAP` 调用池子的 `observe([window, 0])`，窗口默认 600 秒），与索引器里的现价比对：
+已连接节点时，每次报价、构造交易、提交交易，都会对路由经过的每个池子读一次链上 TWAP（`chain.Client.TWAP` 调用池子的 `observe([window, 0])`，窗口默认 600 秒），与索引器里的现价比对：
 
 ```go
 // oracle/oracle.go — CheckTWAP
@@ -2101,7 +2161,6 @@ es.addEventListener("kline", (event) => {
 ### 27. 断路器（Circuit Breaker）
 
 **问题**：后端的索引、TWAP 读取、链上报价抽检、Gas 费用查询、交易广播都要调用以太坊 RPC 节点。当节点故障时：
-
 
 ```
 正常情况：
