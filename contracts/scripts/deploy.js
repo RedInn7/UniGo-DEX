@@ -24,6 +24,9 @@
  * 可选环境变量：
  *   RPC_URL        本地节点地址，默认 http://127.0.0.1:8545
  *   DEPLOY_OUTPUT  把部署结果（地址清单）写成 JSON 文件的路径
+ *   RESUME         上次部署中断时，把已有的 factory / manager / quoter / flashArbitrage / tokens
+ *                  地址写成 JSON 传进来，脚本会复用它们，并跳过已建好、已注入流动性的池子
+ *   GAS_PRICE      固定 gas 价（wei），测试币不多时用
  */
 const fs = require("fs");
 const { ethers } = require("hardhat");
@@ -60,11 +63,42 @@ function align(tick, spacing) {
   return Math.floor(tick / spacing) * spacing;
 }
 
+// 上一次部署中断时留下的地址清单（RESUME 指向的 JSON），已有的合约直接复用
+const existing = process.env.RESUME ? JSON.parse(fs.readFileSync(process.env.RESUME)) : {};
+// 费率对应的 tickSpacing，和 UniGoFactory 构造函数里的一致
+const TICK_SPACING = { 500: 10, 3000: 60, 10000: 200 };
+
 async function deploy(name, ...args) {
   const factory = await ethers.getContractFactory(name);
   const contract = await factory.deploy(...args);
   await contract.waitForDeployment();
   return contract;
+}
+
+// 有现成地址就复用，否则新部署
+async function attachOrDeploy(address, name, ...args) {
+  return address ? ethers.getContractAt(name, address) : deploy(name, ...args);
+}
+
+// 公共 RPC 背后是多台节点，刚出块时读请求可能落到还没同步的节点上，读操作重试几次
+async function read(fn) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i >= 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+}
+
+// 从交易回执里取指定事件的参数；回执是确定的，不受节点同步进度影响
+function eventArgs(receipt, contract, name) {
+  for (const log of receipt.logs) {
+    const parsed = log.address === contract.target ? contract.interface.parseLog(log) : null;
+    if (parsed && parsed.name === name) return parsed.args;
+  }
+  throw new Error(`回执里没有 ${name} 事件`);
 }
 
 async function main() {
@@ -85,12 +119,12 @@ async function main() {
   }
 
   // 1. 核心合约
-  const factory = await deploy("UniGoFactory");
+  const factory = await attachOrDeploy(existing.factory, "UniGoFactory");
   const factoryAddr = await factory.getAddress();
-  const manager = await deploy("UniGoManager", factoryAddr);
+  const manager = await attachOrDeploy(existing.manager, "UniGoManager", factoryAddr);
   const managerAddr = await manager.getAddress();
-  const quoter = await deploy("UniGoQuoter", factoryAddr);
-  const flashArb = await deploy("FlashArbitrage", factoryAddr);
+  const quoter = await attachOrDeploy(existing.quoter, "UniGoQuoter", factoryAddr);
+  const flashArb = await attachOrDeploy(existing.flashArbitrage, "FlashArbitrage", factoryAddr);
 
   // 2. 测试代币；给部署账户和前三个测试账户铸币并授权 Manager
   const tokens = {};
@@ -100,8 +134,10 @@ async function main() {
     ["DAI", "Dai Stablecoin"],
     ["WBTC", "Wrapped BTC"],
   ]) {
-    const token = await deploy("TestERC20", name, symbol);
+    const reused = existing.tokens && existing.tokens[symbol];
+    const token = await attachOrDeploy(reused, "TestERC20", name, symbol);
     tokens[symbol] = { contract: token, address: await token.getAddress() };
+    if (reused) continue;
     for (const account of signers.slice(0, 4)) {
       await (await token.mint(account.address, SUPPLY)).wait();
       await (await token.connect(account).approve(managerAddr, ethers.MaxUint256)).wait();
@@ -123,19 +159,27 @@ async function main() {
   for (const spec of poolSpecs) {
     const base = tokens[spec.base].address;
     const quote = tokens[spec.quote].address;
-    await (await factory.createPool(base, quote, spec.fee)).wait();
-    const poolAddr = await factory.getPool(base, quote, spec.fee);
+    let poolAddr = await read(() => factory.getPool(base, quote, spec.fee));
+    if (poolAddr === ethers.ZeroAddress) {
+      const receipt = await (await factory.createPool(base, quote, spec.fee)).wait();
+      poolAddr = eventArgs(receipt, factory, "PoolCreated").pool;
+    }
     const pool = await ethers.getContractAt("UniGoPool", poolAddr);
 
     // 池子价格是 token1 / token0；base 的地址较小时 base 是 token0，否则取倒数
     const baseIsToken0 = BigInt(base) < BigInt(quote);
     const sqrtPriceX96 = baseIsToken0 ? sqrt(spec.price * Q192) : sqrt(Q192 / spec.price);
-    await (await pool.initialize(sqrtPriceX96)).wait();
+    let tick;
+    if ((await read(() => pool.slot0())).sqrtPriceX96 === 0n) {
+      const receipt = await (await pool.initialize(sqrtPriceX96)).wait();
+      tick = Number(eventArgs(receipt, pool, "Initialize").tick);
+    } else {
+      tick = Number((await read(() => pool.slot0())).tick);
+    }
 
     // 4. 流动性：宽区间打底 + 当前价附近的窄区间 + 上下各一个单边区间，
     //    这样大一点的 swap 会穿越已初始化的 tick
-    const tick = Number((await pool.slot0()).tick);
-    const spacing = Number(await pool.tickSpacing());
+    const spacing = TICK_SPACING[spec.fee];
     const center = align(tick, spacing);
     const positions = [
       [center - 100 * spacing, center + 100 * spacing, spec.liquidity],
@@ -143,7 +187,9 @@ async function main() {
       [center + 2 * spacing, center + 30 * spacing, spec.liquidity * 2n],
       [center - 30 * spacing, center - 2 * spacing, spec.liquidity * 2n],
     ];
-    for (const [tickLower, tickUpper, amount] of positions) {
+    // 当前价位上已经有流动性，说明这个池子上次已经注入过，跳过
+    const funded = (await read(() => pool.liquidity())) > 0n;
+    for (const [tickLower, tickUpper, amount] of funded ? [] : positions) {
       await (
         await manager.mint({
           pool: poolAddr,
@@ -167,7 +213,7 @@ async function main() {
 
   // 自检：链上 Quoter 报一下 1 WETH 换多少 USDC，确认池子真的能成交
   const path = ethers.solidityPacked(["address", "uint24", "address"], [tokens.WETH.address, 500, tokens.USDC.address]);
-  const quoted = await quoter.quoteExactInput.staticCall(path, ethers.parseEther("1"));
+  const quoted = await read(() => quoter.quoteExactInput.staticCall(path, ethers.parseEther("1")));
   console.log(`自检：1 WETH -> ${ethers.formatEther(quoted)} USDC（0.05% 池）`);
 
   const result = {
