@@ -288,3 +288,24 @@ func TestCheckSwap(t *testing.T) {
 		t.Fatalf("rejected metric delta = %d, want 4", got)
 	}
 }
+
+func TestCheckMinAmountOutAndMaxAmountIn(t *testing.T) {
+	g := NewGuard(DefaultConfig()) // MaxSlippage 50%
+	quoted := big.NewInt(1_000_000)
+	if err := g.CheckMinAmountOut(big.NewInt(995_000), quoted); err != nil {
+		t.Fatalf("0.5%% slippage rejected: %v", err)
+	}
+	if err := g.CheckMinAmountOut(big.NewInt(500_000), quoted); err != nil {
+		t.Fatalf("exactly at the floor rejected: %v", err)
+	}
+	if err := g.CheckMinAmountOut(big.NewInt(1), quoted); !errors.Is(err, ErrMinAmountOutTooLow) {
+		t.Fatalf("min_amount_out=1 should be rejected, got %v", err)
+	}
+
+	if got := MaxAmountIn(big.NewInt(1_000_000), 0.005); got.Int64() != 1_005_000 {
+		t.Errorf("MaxAmountIn = %s", got)
+	}
+	if got := MaxAmountIn(big.NewInt(999), 0.001); got.Int64() != 1000 { // 999.999 向上取整
+		t.Errorf("MaxAmountIn round up = %s", got)
+	}
+}

@@ -245,17 +245,46 @@ func isTxIndexing(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "transaction indexing is in progress")
 }
 
+// RawTxInfo 一笔已签名交易的发送方和目标
+type RawTxInfo struct {
+	From string // 签名者地址（小写）
+	To   string // 目标合约地址（小写）；合约创建交易为空
+}
+
+// decodeRawTx 解析已签名交易并恢复签名者
+func decodeRawTx(rawTx string) (*types.Transaction, *RawTxInfo, error) {
+	raw, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid raw transaction: %w", err)
+	}
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(raw); err != nil {
+		return nil, nil, fmt.Errorf("invalid raw transaction: %w", err)
+	}
+	from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid raw transaction signature: %w", err)
+	}
+	info := &RawTxInfo{From: formatAddress(from)}
+	if tx.To() != nil {
+		info.To = formatAddress(*tx.To())
+	}
+	return tx, info, nil
+}
+
+// InspectRawTx 解析已签名交易（0x 开头的十六进制），返回签名者和目标地址，不广播
+func InspectRawTx(rawTx string) (*RawTxInfo, error) {
+	_, info, err := decodeRawTx(rawTx)
+	return info, err
+}
+
 // SendRawTransaction 广播一笔已签名的交易（0x 开头的十六进制），返回交易哈希
 //
 // 后端不托管私钥：交易由用户钱包签名，这里只负责转发。
 func (c *Client) SendRawTransaction(ctx context.Context, rawTx string) (string, error) {
-	raw, err := hexutil.Decode(rawTx)
+	tx, _, err := decodeRawTx(rawTx)
 	if err != nil {
-		return "", fmt.Errorf("invalid raw transaction: %w", err)
-	}
-	tx := new(types.Transaction)
-	if err := tx.UnmarshalBinary(raw); err != nil {
-		return "", fmt.Errorf("invalid raw transaction: %w", err)
+		return "", err
 	}
 	_, err = call(c, func() (struct{}, error) { return struct{}{}, c.eth.SendTransaction(ctx, tx) })
 	if err != nil {

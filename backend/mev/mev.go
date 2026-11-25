@@ -63,6 +63,7 @@ var (
 	ErrPriceImpactTooHigh = errors.New("price impact too high")
 	ErrDeadlineExpired    = errors.New("deadline expired")
 	ErrDeadlineTooFar     = errors.New("deadline too far in the future")
+	ErrMinAmountOutTooLow = errors.New("min_amount_out too low")
 )
 
 // Alert 一次疑似三明治攻击
@@ -152,6 +153,29 @@ func (g *Guard) CheckSwap(priceImpact float64, deadline int64, now time.Time) er
 		metrics.MEVSwapsRejected.Inc()
 	}
 	return err
+}
+
+// CheckMinAmountOut 检查用户设定的最少应得数量是否过松
+//
+// min_amount_out 是防三明治的最后一道闸：设得越低，攻击者能把成交价压得越狠。
+// 低于 报价 × (1 - MaxSlippage) 的请求直接拒绝。
+func (g *Guard) CheckMinAmountOut(minAmountOut, quotedAmountOut *big.Int) error {
+	floor := MinAmountOut(quotedAmountOut, g.cfg.MaxSlippage)
+	if minAmountOut.Cmp(floor) < 0 {
+		metrics.MEVSwapsRejected.Inc()
+		return fmt.Errorf("%w: %s < %s（报价 %s，最大滑点 %.0f%%）",
+			ErrMinAmountOutTooLow, minAmountOut, floor, quotedAmountOut, g.cfg.MaxSlippage*100)
+	}
+	return nil
+}
+
+// MaxAmountIn 精确输出时按滑点计算最多愿意付出的数量：amountIn × (1 + slippage)，向上取整
+func MaxAmountIn(amountIn *big.Int, slippage float64) *big.Int {
+	const precision = 1_000_000
+	scaled := big.NewInt(precision + int64(slippage*precision+0.5))
+	scaled.Mul(scaled, amountIn)
+	scaled.Add(scaled, big.NewInt(precision-1))
+	return scaled.Div(scaled, big.NewInt(precision))
 }
 
 // RecommendSlippage 给出推荐滑点

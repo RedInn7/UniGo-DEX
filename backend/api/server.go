@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"unigo-dex/arb"
 	"unigo-dex/cache"
 	"unigo-dex/chain"
+	"unigo-dex/eip712"
 	"unigo-dex/gas"
 	"unigo-dex/indexer"
 	"unigo-dex/kline"
@@ -21,6 +23,7 @@ import (
 	"unigo-dex/mev"
 	"unigo-dex/oracle"
 	"unigo-dex/router"
+	"unigo-dex/ws"
 )
 
 // server.go — REST API 服务器
@@ -35,6 +38,11 @@ import (
 //   GET  /api/v1/klines        — K 线（pool, interval, limit）
 //   GET  /api/v1/trades        — 最近成交（pool, limit）
 //   GET  /api/v1/mev/alerts    — 三明治攻击告警
+//   POST /api/v1/swap/build    — 把路由编码成待签名交易（Manager 调用数据）
+//   GET  /api/v1/nonce/{address} — EIP-712 签名用的 nonce
+//   GET  /api/v1/twap          — 池子的 TWAP 与现价偏离
+//   GET  /api/v1/arbitrage/opportunities — 套利机会与调用数据
+//   GET  /api/v1/stream        — SSE 实时推送（成交 / K 线 / MEV 告警 / 套利机会）
 //   GET  /metrics              — Prometheus 指标
 //
 // 架构特点：
@@ -50,6 +58,12 @@ type ServerConfig struct {
 	RateLimitPerIP int // 每 IP 每秒请求限制
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
+
+	ManagerAddress string // UniGoManager 地址：待签名交易的目标，也是 EIP-712 的 verifyingContract
+	QuoterAddress  string // UniGoQuoter 地址：配置后对链下报价做链上一致性抽检
+
+	TWAPWindow    uint32 // TWAP 窗口（秒）
+	TWAPMinWindow uint32 // 观测不足时可接受的最短窗口（秒），再短就视为 TWAP 不可用
 }
 
 // DefaultServerConfig 返回默认配置
@@ -60,7 +74,25 @@ func DefaultServerConfig() ServerConfig {
 		RateLimitPerIP: 100,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   30 * time.Second,
+		TWAPWindow:     600,
+		TWAPMinWindow:  60,
 	}
+}
+
+// Deps API 服务器依赖的各个模块
+type Deps struct {
+	Router   *router.Router
+	State    *indexer.PoolStateManager
+	Indexer  *indexer.Indexer
+	Cache    *cache.Cache
+	Oracle   *oracle.Oracle
+	Chain    *chain.Client // 未连接节点时为 nil
+	Gas      *gas.Estimator
+	Klines   *kline.Aggregator
+	Guard    *mev.Guard
+	Arb      *arb.Scanner
+	Hub      *ws.Hub
+	Verifier *eip712.Verifier
 }
 
 // Server API 服务器
@@ -75,33 +107,28 @@ type Server struct {
 	gas        *gas.Estimator
 	klines     *kline.Aggregator
 	guard      *mev.Guard
+	arb        *arb.Scanner
+	hub        *ws.Hub
+	verifier   *eip712.Verifier
 	httpServer *http.Server
 }
 
 // NewServer 创建 API 服务器
-func NewServer(
-	config ServerConfig,
-	r *router.Router,
-	state *indexer.PoolStateManager,
-	idx *indexer.Indexer,
-	c *cache.Cache,
-	o *oracle.Oracle,
-	chainClient *chain.Client,
-	gasEstimator *gas.Estimator,
-	klines *kline.Aggregator,
-	guard *mev.Guard,
-) *Server {
+func NewServer(config ServerConfig, deps Deps) *Server {
 	return &Server{
-		config: config,
-		router: r,
-		state:  state,
-		idxer:  idx,
-		cache:  c,
-		oracle: o,
-		chain:  chainClient,
-		gas:    gasEstimator,
-		klines: klines,
-		guard:  guard,
+		config:   config,
+		router:   deps.Router,
+		state:    deps.State,
+		idxer:    deps.Indexer,
+		cache:    deps.Cache,
+		oracle:   deps.Oracle,
+		chain:    deps.Chain,
+		gas:      deps.Gas,
+		klines:   deps.Klines,
+		guard:    deps.Guard,
+		arb:      deps.Arb,
+		hub:      deps.Hub,
+		verifier: deps.Verifier,
 	}
 }
 
@@ -112,6 +139,11 @@ func (s *Server) Handler() http.Handler {
 	// 注册路由
 	mux.HandleFunc("/api/v1/quote", s.handleQuote)
 	mux.HandleFunc("/api/v1/swap", s.handleSwap)
+	mux.HandleFunc("POST /api/v1/swap/build", s.handleBuildSwap)
+	mux.HandleFunc("GET /api/v1/nonce/{address}", s.handleNonce)
+	mux.HandleFunc("GET /api/v1/twap", s.handleTWAP)
+	mux.HandleFunc("GET /api/v1/arbitrage/opportunities", s.handleArbitrage)
+	mux.Handle("GET /api/v1/stream", s.hub.SSEHandler())
 	mux.HandleFunc("/api/v1/pools", s.handlePools)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("GET /api/v1/tx/{hash}", s.handleTx)
@@ -159,8 +191,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // 流程：
 //  1. 解析请求参数
 //  2. 检查缓存（Singleflight 防击穿）
-//  3. 调用路由引擎查找最优路径
-//  4. 预言机验证价格安全性
+//  3. 调用路由引擎查找最优路径（逐 tick 模拟，与链上 Quoter 一致）
+//  4. 价格安全检查：TWAP 操纵校验 + 预言机保护模式
 //  5. MEV 保护：价格冲击、推荐滑点与 min_amount_out
 //  6. Gas 成本评估
 //  7. 返回报价结果
@@ -202,9 +234,8 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 预言机验证
-	pair := tokenIn + "/" + tokenOut
-	_, _, warning := s.oracle.ValidateSwap(pair, 0.005)
+	// 价格安全检查：报价只给警告，不拒绝
+	safety := s.checkPriceSafety(r.Context(), route, 0.005)
 
 	// MEV 保护
 	slippage, mevWarning := s.guard.RecommendSlippage(poolAddresses(route), slippage, time.Now())
@@ -214,20 +245,24 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		MinAmountOut: mev.MinAmountOut(route.AmountOut, slippage).String(),
 		Slippage:     slippage,
 		Path:         route.Path,
+		Fees:         route.Fees(),
 		PriceImpact:  mev.PriceImpact(route.Pools, tokenIn, amountIn, route.AmountOut),
 		GasEstimate:  route.GasEstimate,
 		Gas:          s.gas.Estimate(r.Context(), route.GasEstimate),
 		TicksCrossed: route.TicksCrossed,
 		IsDegraded:   route.IsDegraded,
-		Warning:      joinWarnings(warning, mevWarning),
+		Warning:      joinWarnings(safety.warning, mevWarning),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // findRoute 查找路由，结果经缓存（Singleflight 防击穿）
+//
+// 缓存 key 带上索引器的最新区块号：池子状态只在新区块到来时变化，
+// 同一区块内重复报价直接命中缓存，出了新区块自动失效，不会返回过期报价。
 func (s *Server) findRoute(ctx context.Context, tokenIn, tokenOut string, amountIn *big.Int) (*router.Route, error) {
-	cacheKey := fmt.Sprintf("quote:%s:%s:%s", tokenIn, tokenOut, amountIn.String())
+	cacheKey := fmt.Sprintf("quote:%s:%s:%s:%d", tokenIn, tokenOut, amountIn.String(), s.idxer.GetStats().LastBlockNumber)
 	result, err := s.cache.GetOrLoad(cacheKey, func() (interface{}, error) {
 		// 缓存未命中，执行路由搜索
 		return s.router.FindBestRoute(ctx, tokenIn, tokenOut, amountIn)
@@ -242,12 +277,13 @@ func (s *Server) findRoute(ctx context.Context, tokenIn, tokenOut string, amount
 //
 // 流程：
 //  1. 解析请求
-//  2. 预言机校验价格安全性
-//  3. MEV 交易前保护：价格冲击过大、deadline 已过期或过长时拒绝
-//  4. 请求带有已签名交易（raw_tx）时广播到链上，返回真实交易哈希；
+//  2. 验证 EIP-712 签名（域分隔符 + nonce + deadline 三层防重放），确认请求确实出自 owner
+//  3. 价格安全检查：现价偏离 TWAP（疑似被操纵）或保护模式下滑点不合规时拒绝
+//  4. MEV 交易前保护：价格冲击过大、deadline 已过期或过长、min_amount_out 过松时拒绝
+//  5. 请求带有已签名交易（raw_tx）时广播到链上，返回真实交易哈希；
 //     否则只返回检查结果，由客户端自行提交
 //
-// 后端不托管私钥，不会替用户签名。
+// 后端不托管私钥，不会替用户签名。raw_tx 必须由 owner 签名、发给 Manager 合约。
 func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "only POST allowed")
@@ -255,8 +291,7 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SwapRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	tokenIn, tokenOut := strings.ToLower(req.TokenIn), strings.ToLower(req.TokenOut)
@@ -265,24 +300,53 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid amount_in")
 		return
 	}
-
-	// 预言机验证
-	pair := tokenIn + "/" + tokenOut
-	allowed, _, warning := s.oracle.ValidateSwap(pair, req.Slippage)
-	if !allowed {
-		writeError(w, http.StatusForbidden, warning)
+	minAmountOut, ok := new(big.Int).SetString(req.MinAmountOut, 10)
+	if !ok || minAmountOut.Sign() < 0 {
+		writeError(w, http.StatusBadRequest, "invalid min_amount_out")
 		return
 	}
 
-	// MEV 交易前保护：没有报价就无法评估价格冲击，不放行
+	// EIP-712 验签
+	sig, err := eip712.ParseSignature(req.Signature)
+	if err == nil {
+		err = s.verifier.Verify(&eip712.SwapPermit{
+			Owner:        req.Owner,
+			TokenIn:      req.TokenIn,
+			TokenOut:     req.TokenOut,
+			AmountIn:     req.AmountIn,
+			MinAmountOut: req.MinAmountOut,
+			Nonce:        req.Nonce,
+			Deadline:     req.Deadline,
+		}, sig)
+	}
+	if err != nil {
+		metrics.SwapSignatureRejected.Inc()
+		writeError(w, http.StatusUnauthorized, "signature rejected: "+err.Error())
+		return
+	}
+
+	// 没有报价就无法评估价格冲击，不放行
 	route, err := s.findRoute(r.Context(), tokenIn, tokenOut, amountIn)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "route search failed: "+err.Error())
 		return
 	}
+
+	// 价格安全检查
+	safety := s.checkPriceSafety(r.Context(), route, req.Slippage)
+	if safety.rejected {
+		writeError(w, http.StatusForbidden, safety.warning)
+		return
+	}
+
+	// MEV 交易前保护
 	now := time.Now()
 	impact := mev.PriceImpact(route.Pools, tokenIn, amountIn, route.AmountOut)
 	if err := s.guard.CheckSwap(impact, req.Deadline, now); err != nil {
+		writeError(w, http.StatusBadRequest, "swap rejected: "+err.Error())
+		return
+	}
+	if err := s.guard.CheckMinAmountOut(minAmountOut, route.AmountOut); err != nil {
 		writeError(w, http.StatusBadRequest, "swap rejected: "+err.Error())
 		return
 	}
@@ -292,12 +356,26 @@ func (s *Server) handleSwap(w http.ResponseWriter, r *http.Request) {
 		Status:       "validated",
 		PriceImpact:  impact,
 		MinAmountOut: mev.MinAmountOut(route.AmountOut, slippage).String(),
-		Warning:      joinWarnings(warning, mevWarning),
+		Warning:      joinWarnings(safety.warning, mevWarning),
 	}
 
 	if req.RawTx != "" {
 		if s.chain == nil {
 			writeError(w, http.StatusServiceUnavailable, "chain node not configured, cannot broadcast raw_tx")
+			return
+		}
+		// 只转发 owner 自己签名、发给 Manager 的交易
+		info, err := chain.InspectRawTx(req.RawTx)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if info.From != strings.ToLower(req.Owner) {
+			writeError(w, http.StatusForbidden, "raw_tx is not signed by owner")
+			return
+		}
+		if s.config.ManagerAddress != "" && info.To != strings.ToLower(s.config.ManagerAddress) {
+			writeError(w, http.StatusForbidden, "raw_tx is not addressed to the Manager contract")
 			return
 		}
 		txHash, err := s.chain.SendRawTransaction(r.Context(), req.RawTx)
@@ -441,6 +519,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // ===== 辅助函数 =====
+
+// decodeJSON 解析请求体（限制 1MB），失败时写 400 并返回 false
+func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return false
+	}
+	return true
+}
 
 // parseLimit 解析 limit 参数：缺省用 def，范围 1~1000
 func parseLimit(v string, def int) (int, bool) {
