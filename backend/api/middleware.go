@@ -56,7 +56,8 @@ func (cl *ConcurrencyLimiter) Middleware(next http.Handler) http.Handler {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, `{"error":"服务器繁忙，请稍后重试","code":503}`, http.StatusServiceUnavailable)
 			metrics.HTTPConcurrencyRejected.Inc()
-			logging.L(r.Context()).Warn("并发上限触发，拒绝请求", "method", r.Method, "path", r.URL.Path)
+			// 过载时每秒可能拒绝上万个请求，逐条打日志只会雪上加霜；拒绝数看指标
+			logging.L(r.Context()).Debug("并发上限触发，拒绝请求", "method", r.Method, "path", r.URL.Path)
 		}
 	})
 }
