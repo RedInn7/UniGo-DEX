@@ -508,7 +508,7 @@ func TestKlinesAndTradesEndpoints(t *testing.T) {
 	if code := s.do(t, "GET", "/api/v1/klines?pool=0x"+strings.ToUpper(testPool[2:])+"&interval=1m", "", &candles); code != http.StatusOK || len(candles) != 2 {
 		t.Fatalf("klines: code = %d, %+v", code, candles)
 	}
-	if candles[0].Close != 1 || candles[0].Volume0 != 100 || candles[0].Trades != 1 {
+	if candles[0].Close != 1 || candles[0].Volume0 != "100" || candles[0].Trades != 1 {
 		t.Fatalf("candle = %+v", candles[0])
 	}
 	if code := s.do(t, "GET", "/api/v1/klines?pool="+testPool+"&interval=1h&limit=1", "", &candles); code != http.StatusOK || len(candles) != 1 || candles[0].Trades != 2 {

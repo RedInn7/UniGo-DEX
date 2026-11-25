@@ -814,18 +814,18 @@ func TestEndToEnd(t *testing.T) {
 		// K 线的成交笔数和成交量之和等于逐笔成交的合计（1h 周期同理）
 		for _, interval := range []string{"1m", "1h"} {
 			w.get(t, "/api/v1/klines?pool="+w.poolBC3000.Hex()+"&interval="+interval+"&limit=1000", &candles)
-			count, volume0 := 0, 0.0
+			count, volume0 := 0, new(big.Int)
 			for _, c := range candles {
 				count += c.Trades
-				volume0 += c.Volume0
+				volume0.Add(volume0, dec(c.Volume0))
 			}
-			wantVolume0 := 0.0
+			wantVolume0 := new(big.Int)
 			for _, tr := range trades {
-				v, _ := new(big.Float).SetInt(new(big.Int).Abs(dec(tr.Amount0))).Float64()
-				wantVolume0 += v
+				wantVolume0.Add(wantVolume0, new(big.Int).Abs(dec(tr.Amount0)))
 			}
-			if count != len(trades) || volume0 < wantVolume0*0.999999 || volume0 > wantVolume0*1.000001 {
-				t.Fatalf("%s K 线合计 %d 笔 / volume0=%v，逐笔成交 %d 笔 / %v", interval, count, volume0, len(trades), wantVolume0)
+			// 成交量是定点整数，合计必须一位不差
+			if count != len(trades) || volume0.Cmp(wantVolume0) != 0 {
+				t.Fatalf("%s K 线合计 %d 笔 / volume0=%s，逐笔成交 %d 笔 / %s", interval, count, volume0, len(trades), wantVolume0)
 			}
 		}
 

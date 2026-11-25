@@ -48,26 +48,26 @@ func TestAggregateAcrossIntervals(t *testing.T) {
 
 	want := map[string][]Candle{
 		"1m": {
-			{OpenTime: base, Open: 1, High: 4, Low: 1, Close: 4, Volume0: 130, Volume1: 130, Trades: 2},
-			{OpenTime: base + 60, Open: 9, High: 9, Low: 9, Close: 9, Volume0: 10, Volume1: 5, Trades: 1},
-			{OpenTime: base + 360, Open: 4, High: 4, Low: 4, Close: 4, Volume0: 20, Volume1: 10, Trades: 1},
-			{OpenTime: base + 3660, Open: 1, High: 1, Low: 1, Close: 1, Volume0: 1, Volume1: 1, Trades: 1},
+			{OpenTime: base, Open: 1, High: 4, Low: 1, Close: 4, Volume0: "130", Volume1: "130", Trades: 2},
+			{OpenTime: base + 60, Open: 9, High: 9, Low: 9, Close: 9, Volume0: "10", Volume1: "5", Trades: 1},
+			{OpenTime: base + 360, Open: 4, High: 4, Low: 4, Close: 4, Volume0: "20", Volume1: "10", Trades: 1},
+			{OpenTime: base + 3660, Open: 1, High: 1, Low: 1, Close: 1, Volume0: "1", Volume1: "1", Trades: 1},
 		},
 		"5m": {
-			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 9, Volume0: 140, Volume1: 135, Trades: 3},
-			{OpenTime: base + 300, Open: 4, High: 4, Low: 4, Close: 4, Volume0: 20, Volume1: 10, Trades: 1},
-			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: 1, Volume1: 1, Trades: 1},
+			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 9, Volume0: "140", Volume1: "135", Trades: 3},
+			{OpenTime: base + 300, Open: 4, High: 4, Low: 4, Close: 4, Volume0: "20", Volume1: "10", Trades: 1},
+			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: "1", Volume1: "1", Trades: 1},
 		},
 		"15m": {
-			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 4, Volume0: 160, Volume1: 145, Trades: 4},
-			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: 1, Volume1: 1, Trades: 1},
+			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 4, Volume0: "160", Volume1: "145", Trades: 4},
+			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: "1", Volume1: "1", Trades: 1},
 		},
 		"1h": {
-			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 4, Volume0: 160, Volume1: 145, Trades: 4},
-			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: 1, Volume1: 1, Trades: 1},
+			{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 4, Volume0: "160", Volume1: "145", Trades: 4},
+			{OpenTime: base + 3600, Open: 1, High: 1, Low: 1, Close: 1, Volume0: "1", Volume1: "1", Trades: 1},
 		},
-		"4h": {{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 1, Volume0: 161, Volume1: 146, Trades: 5}},
-		"1d": {{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 1, Volume0: 161, Volume1: 146, Trades: 5}},
+		"4h": {{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 1, Volume0: "161", Volume1: "146", Trades: 5}},
+		"1d": {{OpenTime: base, Open: 1, High: 9, Low: 1, Close: 1, Volume0: "161", Volume1: "146", Trades: 5}},
 	}
 	for interval, w := range want {
 		if got := klines(t, a, interval); !reflect.DeepEqual(got, w) {
@@ -149,7 +149,7 @@ func TestReorgRecomputesCandles(t *testing.T) {
 
 	// 回滚后那根 1m 的最高价应回到 4，而不是被回滚成交的 25
 	oneMin := klines(t, a, "1m")
-	if last := oneMin[len(oneMin)-1]; last.High != 4 || last.Trades != 2 || last.Volume0 != 150 {
+	if last := oneMin[len(oneMin)-1]; last.High != 4 || last.Trades != 2 || last.Volume0 != "150" {
 		t.Errorf("recomputed 1m candle = %+v", last)
 	}
 
@@ -210,4 +210,89 @@ func TestConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// 成交量用定点整数累加：超过 float64 精度（2^53）的金额也一位不差
+func TestVolumeIsExact(t *testing.T) {
+	a := NewAggregator(DefaultConfig())
+	big1, _ := new(big.Int).SetString("123456789012345678901234567", 10)
+	e1 := swap(1, base+1, 1, 0, 0)
+	e1.Amount0, e1.Amount1 = big1, new(big.Int).Neg(big.NewInt(1))
+	e2 := swap(2, base+2, 1, 0, 0)
+	e2.Amount0, e2.Amount1 = new(big.Int).Neg(big.NewInt(3)), big1
+	a.OnSwap(e1)
+	a.OnSwap(e2)
+
+	for _, iv := range intervals {
+		c := klines(t, a, iv.name)[0]
+		if c.Volume0 != "123456789012345678901234570" || c.Volume1 != "123456789012345678901234568" {
+			t.Fatalf("%s: volume0=%s volume1=%s", iv.name, c.Volume0, c.Volume1)
+		}
+	}
+}
+
+// 回滚的精确性不依赖保留了多少笔成交：同一分钟里的成交远多于 MaxTrades 时，
+// 回滚后的 K 线仍与"从没见过被回滚的成交"完全一致
+func TestReorgExactBeyondTradeRetention(t *testing.T) {
+	cfg := Config{MaxCandles: 1440, MaxTrades: 3, MaxPools: 8}
+	feed := func(a *Aggregator, upToBlock uint64) {
+		// 每个区块 4 笔成交、间隔 2 秒：一分钟里有 7~8 个区块、约 30 笔成交
+		for block := uint64(1); block <= upToBlock; block++ {
+			for i := int64(0); i < 4; i++ {
+				ts := base + int64(block)*8 + i*2
+				a.OnSwap(swap(block, ts, 1+(int64(block)*7+i)%9, 10+int64(block), -(5 + i)))
+			}
+		}
+	}
+	for _, fork := range []uint64{2, 9, 17, 30} {
+		a := NewAggregator(cfg)
+		feed(a, 30)
+		a.OnReorg(fork)
+
+		want := NewAggregator(cfg)
+		feed(want, fork-1)
+		for _, iv := range intervals {
+			if got, w := klines(t, a, iv.name), klines(t, want, iv.name); !reflect.DeepEqual(got, w) {
+				t.Fatalf("fork=%d %s:\n got  %+v\n want %+v", fork, iv.name, got, w)
+			}
+		}
+		// 成交记录里不会再有被回滚的成交（已被淘汰的旧成交不会回来，所以条数可能少于 MaxTrades）
+		for _, tr := range a.Trades(pool, 0) {
+			if tr.BlockNumber >= fork {
+				t.Fatalf("fork=%d: trade from block %d survived the rollback", fork, tr.BlockNumber)
+			}
+		}
+
+		// 连续两次回滚（第二次更深），以及回滚后继续写入，都要保持一致
+		a.OnReorg(fork - 1)
+		want = NewAggregator(cfg)
+		feed(want, fork-2)
+		a.OnSwap(swap(40, base+400, 3, 7, -7))
+		want.OnSwap(swap(40, base+400, 3, 7, -7))
+		for _, iv := range intervals {
+			if got, w := klines(t, a, iv.name), klines(t, want, iv.name); !reflect.DeepEqual(got, w) {
+				t.Fatalf("fork=%d second rollback %s:\n got  %+v\n want %+v", fork, iv.name, got, w)
+			}
+		}
+	}
+}
+
+// 回滚深度超过检查点保留范围时退回到用保留的成交重建，不会留下被回滚的数据
+func TestReorgDeeperThanCheckpoints(t *testing.T) {
+	a := NewAggregator(DefaultConfig())
+	total := uint64(maxCheckpoints + 50)
+	for block := uint64(1); block <= total; block++ {
+		a.OnSwap(swap(block, base+int64(block)*30, 1+int64(block)%5, 10, -10))
+	}
+	a.OnReorg(5) // 远在最老的检查点之前
+
+	want := NewAggregator(DefaultConfig())
+	for block := uint64(1); block < 5; block++ {
+		want.OnSwap(swap(block, base+int64(block)*30, 1+int64(block)%5, 10, -10))
+	}
+	for _, iv := range intervals {
+		if got, w := klines(t, a, iv.name), klines(t, want, iv.name); !reflect.DeepEqual(got, w) {
+			t.Fatalf("%s:\n got  %+v\n want %+v", iv.name, got, w)
+		}
+	}
 }
