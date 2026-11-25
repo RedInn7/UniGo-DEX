@@ -65,6 +65,28 @@
 
 细节见 [docs/contracts.md](docs/contracts.md)，第 1 到 13 节。
 
+### 数学库：自己写的和开源库一键切换
+
+底层运算有两套实现，接口相同，用一个环境变量 `MATH_IMPL` 选，默认 `native`。
+
+| | `native`（默认） | `oss` |
+|---|---|---|
+| 合约 | `lib/Math.sol`、`lib/BitMath.sol`，自己写的 512 位 `mulDiv` 和位查找 | `lib/oss/` 下的同名库，转给 OpenZeppelin 的 `Math.mulDiv` / `Math.log2` |
+| Go 后端 | `backend/math`，用 `math/big` 照着链上逻辑写的 | 社区的 `daoleno/uniswapv3-sdk` |
+| 怎么切 | 不用设 | 编译、测试、启动时加 `MATH_IMPL=oss` |
+
+合约这边 Solidity 没有条件编译，做法是在 Hardhat 读源文件那一步把 `lib/Math.sol` 换成 `lib/oss/Math.sol`，其它合约一行不改。Go 这边是启动时选一组函数，之后所有调用都走它。
+
+```bash
+cd contracts && npm run test:oss                 # 合约测试，开源库版本
+cd backend && MATH_IMPL=oss go test -p 2 ./...   # 后端测试，开源库版本
+cd backend && MATH_IMPL=oss go run .             # 后端用开源库启动，日志里会打印 impl=oss
+```
+
+两种模式跑的是同一套测试：合约 109 个用例、Go 单元测试、12 个端到端场景，结果都一样。`backend/math/impl_test.go` 另外拿 2 万组随机输入把两套 Go 实现逐个函数比了一遍，逐位相同。换成开源库之后 `UniGoPool` 的字节码从 18,285 字节变成 17,803 字节。
+
+TickMath、SqrtPriceMath、SwapMath 这几个 V3 专有的库没有做成可切换的。Uniswap 官方的 v3-core 是 Solidity 0.7 写的，和这里的 0.8.20 不能直接混用。
+
 ### 闪电贷三池套利
 
 ![闪电贷三池套利](docs/img/flash-arbitrage.svg)
