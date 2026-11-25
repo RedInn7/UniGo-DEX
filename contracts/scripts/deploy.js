@@ -16,6 +16,11 @@
  *   npx hardhat node                                       # 启动本地节点
  *   npx hardhat run scripts/deploy.js --network localhost  # 部署到本地
  *
+ * 部署到测试网（需要 DEPLOYER_KEY，账户里要有测试币）：
+ *   DEPLOYER_KEY=0x... npx hardhat run scripts/deploy.js --network sepolia
+ *   测试网上不部署模拟聚合器，直接读 Chainlink 官方的 ETH / USD 喂价，
+ *   WETH/USDC 池子的初始价格也取自喂价
+ *
  * 可选环境变量：
  *   RPC_URL        本地节点地址，默认 http://127.0.0.1:8545
  *   DEPLOY_OUTPUT  把部署结果（地址清单）写成 JSON 文件的路径
@@ -27,6 +32,16 @@ const Q192 = 2n ** 192n;
 const DEADLINE = 4102444800n; // 2100 年
 // 每个账户铸造的代币数量
 const SUPPLY = ethers.parseEther("1000000000000");
+
+// Chainlink 官方 ETH / USD 喂价地址（按 chainId）
+const ETH_USD_FEEDS = {
+  11155111: "0x694AA1769357215DE4FAC081bf1f309aDC325306", // Sepolia
+  84532: "0x4aDC67696bA383F43DD60A9e78F2C97Fbbfc7cb1", // Base Sepolia
+};
+const FEED_ABI = [
+  "function decimals() view returns (uint8)",
+  "function latestRoundData() view returns (uint80, int256, uint256, uint256, uint80)",
+];
 
 // BigInt 整数平方根（向下取整）
 function sqrt(value) {
@@ -56,6 +71,18 @@ async function main() {
   const signers = await ethers.getSigners();
   const deployer = signers[0];
   console.log("部署账户:", deployer.address);
+  const balanceBefore = await ethers.provider.getBalance(deployer.address);
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+
+  // 有官方喂价的网络直接用官方喂价；CHAINLINK_ETH_USD 可以手动指定（分叉演练时用）
+  const realFeed = process.env.CHAINLINK_ETH_USD || ETH_USD_FEEDS[chainId];
+  let ethPrice = 2000n;
+  if (realFeed) {
+    const aggregator = new ethers.Contract(realFeed, FEED_ABI, ethers.provider);
+    const [, answer] = await aggregator.latestRoundData();
+    ethPrice = answer / 10n ** BigInt(await aggregator.decimals());
+    console.log(`Chainlink ETH / USD 喂价 ${realFeed}：${ethPrice}`);
+  }
 
   // 1. 核心合约
   const factory = await deploy("UniGoFactory");
@@ -85,8 +112,8 @@ async function main() {
   //    窄区间和单边区间按倍数叠加。同样的资金量，价格越接近 1 需要的 L 越大，
   //    所以稳定币对给得多一些，各池子当前价 ±10% 内的深度都在百万美元量级
   const poolSpecs = [
-    { base: "WETH", quote: "USDC", fee: 500, price: 2000n, liquidity: 5n * 10n ** 24n },
-    { base: "WETH", quote: "USDC", fee: 3000, price: 2000n, liquidity: 5n * 10n ** 24n },
+    { base: "WETH", quote: "USDC", fee: 500, price: ethPrice, liquidity: 5n * 10n ** 24n },
+    { base: "WETH", quote: "USDC", fee: 3000, price: ethPrice, liquidity: 5n * 10n ** 24n },
     { base: "USDC", quote: "DAI", fee: 500, price: 1n, liquidity: 10n ** 26n },
     { base: "USDC", quote: "DAI", fee: 3000, price: 1n, liquidity: 10n ** 26n },
     { base: "WBTC", quote: "DAI", fee: 3000, price: 60000n, liquidity: 10n ** 24n },
@@ -134,8 +161,9 @@ async function main() {
   }
 
   // 5. 模拟的 Chainlink 聚合器：ETH / USD，8 位小数
-  const feed = await deploy("TestAggregator", 8, "ETH / USD", 2000n * 10n ** 8n);
-  const feedAddr = await feed.getAddress();
+  //    测试网上用官方喂价，不部署模拟合约
+  const feedAddr =
+    realFeed || (await (await deploy("TestAggregator", 8, "ETH / USD", 2000n * 10n ** 8n)).getAddress());
 
   // 自检：链上 Quoter 报一下 1 WETH 换多少 USDC，确认池子真的能成交
   const path = ethers.solidityPacked(["address", "uint24", "address"], [tokens.WETH.address, 500, tokens.USDC.address]);
@@ -144,7 +172,7 @@ async function main() {
 
   const result = {
     rpcUrl: process.env.RPC_URL || "http://127.0.0.1:8545",
-    chainId: Number((await ethers.provider.getNetwork()).chainId),
+    chainId,
     factory: factoryAddr,
     manager: managerAddr,
     quoter: await quoter.getAddress(),
@@ -154,6 +182,8 @@ async function main() {
     chainlinkFeeds: `${tokens.WETH.address}:${tokens.USDC.address}:${feedAddr}:18:18:3600`,
     aggregator: feedAddr,
   };
+  const spent = balanceBefore - (await ethers.provider.getBalance(deployer.address));
+  console.log(`部署总花费：${ethers.formatEther(spent)} ETH`);
   if (process.env.DEPLOY_OUTPUT) {
     fs.writeFileSync(process.env.DEPLOY_OUTPUT, JSON.stringify(result, null, 2) + "\n");
   }
