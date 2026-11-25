@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="'Inter','SF Pro Display','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC','Segoe UI',system-ui,sans-serif">
+<!-- 价格安全：三方校验与三明治检测 -->
+<defs>
+<linearGradient id="g-client" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+<linearGradient id="g-gate" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0891b2"/></linearGradient>
+<linearGradient id="g-core" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+<linearGradient id="g-teal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/></linearGradient>
+<linearGradient id="g-state" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#047857"/></linearGradient>
+<linearGradient id="g-chain" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#c2410c"/></linearGradient>
+<linearGradient id="g-risk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#9d174d"/></linearGradient>
+<linearGradient id="g-violet" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/></linearGradient>
+<linearGradient id="g-grey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#475569"/><stop offset="1" stop-color="#334155"/></linearGradient>
+<linearGradient id="g-chip" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+<linearGradient id="g-title" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#a78bfa"/><stop offset="1" stop-color="#f9a8d4"/></linearGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#ffffff" fill-opacity=".04"/></pattern>
+<filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".3"/></filter>
+<filter id="glow" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="8" result="b"/><feFlood flood-color="#38bdf8" flood-opacity=".55"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#fbbf24"/></marker>
+<marker id="a-tx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f472b6"/></marker>
+<style>
+.layer{fill:#ffffff;fill-opacity:.03;stroke:#ffffff;stroke-opacity:.1;stroke-width:1}
+.lt{font-size:12px;font-weight:700;letter-spacing:1.5px;fill:#8b949e}
+.box{stroke:rgba(255,255,255,.15);stroke-width:1.2}
+.tag{font:500 10px 'JetBrains Mono','SF Mono',Menlo,Consolas,'PingFang SC','Microsoft YaHei',monospace;fill:#fff;fill-opacity:.72}
+.t{font-size:15px;font-weight:700;fill:#fff}
+.s{font-size:11px;fill:#fff;fill-opacity:.82}
+.c1{font-size:13px;font-weight:700;fill:#fff}
+.c2{font-size:10px;fill:#fff;fill-opacity:.8}
+.note{font-size:11px;fill:#8b949e}
+.p{font-size:12px;fill:#c9d1d9}
+.hl{font-size:12px;font-weight:700;fill:#7dd3fc}
+.sync{fill:none;stroke:#38bdf8;stroke-width:1.8}
+.async{fill:none;stroke:#fbbf24;stroke-width:1.8;stroke-dasharray:5 5;animation:flow 1.2s linear infinite}
+.tx{fill:none;stroke:#f472b6;stroke-width:1.8}
+@keyframes flow{to{stroke-dashoffset:-20}}
+@media (prefers-reduced-motion:reduce){.async{animation:none}}
+</style>
+</defs>
+
+<rect width="1200" height="800" fill="#0d1117"/><rect width="1200" height="800" fill="url(#dots)"/>
+<text x="40" y="40" font-size="24" font-weight="800" fill="url(#g-title)">价格安全：三方校验与三明治检测</text>
+<text x="40" y="62" font-size="12.5" fill="#8b949e">不单信任何一个价格源。现价、TWAP、Chainlink 两两比较，偏离过大就拒绝或进保护模式。</text>
+<!-- Left: 三方校验 -->
+<rect class="layer" x="40" y="76" width="680" height="484" rx="12"/>
+<text class="lt" x="64" y="93" text-anchor="start">CROSS-CHECK 三个价格源两两比较</text>
+<rect class="box" x="260" y="112" width="240" height="74" rx="8" ry="8" fill="url(#g-violet)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="380.0" y="136.0">[Feed] latestRoundData</text><text class="t" style="font-size:15px" x="380.0" y="155.0">Chainlink 喂价</text><text class="s" x="380.0" y="170.0">独立于池子 · 五项有效性检查</text></g>
+<rect class="box" x="64" y="324" width="240" height="74" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="184.0" y="348.0">[Spot] sqrtPriceX96</text><text class="t" style="font-size:15px" x="184.0" y="367.0">池内现价</text><text class="s" x="184.0" y="382.0">实时，但一笔大单就能拉偏</text></g>
+<rect class="box" x="456" y="324" width="240" height="74" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="576.0" y="348.0">[TWAP] observe · 窗口 600 秒</text><text class="t" style="font-size:15px" x="576.0" y="367.0">池内 TWAP</text><text class="s" x="576.0" y="382.0">操纵成本高，对行情反应慢</text></g>
+<path class="sync" d="M320 188 V254 H184 V322" marker-end="url(#a-sync)" marker-start="url(#a-sync)"/>
+<path class="sync" d="M440 188 V254 H576 V322" marker-end="url(#a-sync)" marker-start="url(#a-sync)"/>
+<path class="sync" d="M306 361 H454" marker-end="url(#a-sync)" marker-start="url(#a-sync)"/>
+<text class="hl" x="194" y="284" text-anchor="start" >偏离 &gt; 2%</text>
+<text class="p" x="194" y="302" text-anchor="start" >403 拒绝，并进保护模式</text>
+<text class="hl" x="566" y="284" text-anchor="end" >偏离 &gt; 2%</text>
+<text class="p" x="566" y="302" text-anchor="end" >进保护模式</text>
+<text class="hl" x="380" y="424" text-anchor="middle" >偏离 &gt; 5%：疑似单区块操纵，403 拒绝，并进保护模式</text>
+<text class="lt" x="64" y="458" text-anchor="start" >降级规则</text>
+<text class="p" x="64" y="480" text-anchor="start" style="font-size:11.5px">· 喂价过期 / 轮次未完成 / 旧轮次 / 非正数 / 节点查不到 → 只比现价和 TWAP，响应里写明原因</text>
+<text class="p" x="64" y="500" text-anchor="start" style="font-size:11.5px">· TWAP 观测不足 → 退到能覆盖的最长窗口，连 60 秒都覆盖不了才算不可用</text>
+<text class="p" x="64" y="520" text-anchor="start" style="font-size:11.5px">· 保护模式至少持续 5 分钟，期间滑点低于 0.5% 的请求被拒</text>
+<text class="p" x="64" y="540" text-anchor="start" style="font-size:11.5px">· /quote 只给警告；/swap/build 和 /swap 才会 403</text>
+<!-- Right: 三明治 -->
+<rect class="layer" x="740" y="76" width="420" height="484" rx="12"/>
+<text class="lt" x="764" y="93" text-anchor="start">SANDWICH 同一区块、同一池子，按 logIndex 排</text>
+<rect class="box" x="764" y="112" width="372" height="64" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="950.0" y="131.0">[抢跑] 攻击者</text><text class="t" style="font-size:15px" x="950.0" y="150.0">买入</text><text class="s" x="950.0" y="165.0">先把价格推高</text></g>
+<rect class="box" x="764" y="204" width="372" height="64" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="950.0" y="223.0">[受害者] 别人的同向交易</text><text class="t" style="font-size:15px" x="950.0" y="242.0">买入</text><text class="s" x="950.0" y="257.0">以更差的价格成交</text></g>
+<rect class="box" x="764" y="296" width="372" height="64" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="950.0" y="315.0">[平仓] 同一个攻击者</text><text class="t" style="font-size:15px" x="950.0" y="334.0">卖出</text><text class="s" x="950.0" y="349.0">方向相反，差价入袋</text></g>
+<path class="tx" d="M950 176 V202" marker-end="url(#a-tx)"/>
+<path class="tx" d="M950 268 V294" marker-end="url(#a-tx)"/>
+<text class="lt" x="764" y="392" text-anchor="start" >配对条件</text>
+<text class="p" x="764" y="414" text-anchor="start" style="font-size:11.5px">· 首尾两笔的 sender 和 recipient 都相同、方向相反</text>
+<text class="p" x="764" y="434" text-anchor="start" style="font-size:11.5px">· 中间至少夹着一笔别人的同向交易</text>
+<text class="p" x="764" y="454" text-anchor="start" style="font-size:11.5px">· 用两个索引代替向前逐笔扫描，单笔 O(log n)</text>
+<text class="p" x="776" y="474" text-anchor="start" style="font-size:11.5px">最不利输入下 49 ns/笔，改之前是 16,698 ns</text>
+<text class="p" x="764" y="502" text-anchor="start" style="font-size:11.5px">命中后记告警、推 SSE；这个池子 10 分钟内的</text>
+<text class="p" x="764" y="522" text-anchor="start" style="font-size:11.5px">推荐滑点从 0.5% 收紧到 0.1%</text>
+<!-- Bottom: 交易前检查 -->
+<rect class="layer" x="40" y="580" width="1120" height="160" rx="12"/>
+<text class="lt" x="64" y="597" text-anchor="start">PRE-TRADE 交易前检查（/swap/build 与 /swap）</text>
+<rect class="box" x="64" y="612" width="250" height="76" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="637.0">[Impact]</text><text class="t" style="font-size:15px" x="189.0" y="656.0">价格冲击</text><text class="s" x="189.0" y="671.0">超过 5% 拒绝</text></g>
+<rect class="box" x="338" y="612" width="250" height="76" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="637.0">[Deadline]</text><text class="t" style="font-size:15px" x="463.0" y="656.0">deadline</text><text class="s" x="463.0" y="671.0">已过期，或离现在超过 30 分钟：拒绝</text></g>
+<rect class="box" x="612" y="612" width="250" height="76" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="637.0">[Slippage]</text><text class="t" style="font-size:15px" x="737.0" y="656.0">min_amount_out</text><text class="s" x="737.0" y="671.0">比报价低 50% 以上算过松：拒绝</text></g>
+<rect class="box" x="886" y="612" width="250" height="76" rx="8" ry="8" fill="url(#g-gate)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="637.0">[EIP-712] /swap</text><text class="t" style="font-size:15px" x="1011.0" y="656.0">验签防重放</text><text class="s" x="1011.0" y="671.0">deadline · nonce · 域分隔 · 拒绝高 s</text></g>
+<text class="p" x="64" y="720" text-anchor="start" >状态码：验签失败 401 · 价格安全拒绝 403 · 交易前检查不过 400</text>
+<text class="note" x="40" y="770" text-anchor="start" >集成测试里跑过：单区块大单把现价砸偏 18.87% 被拒；喂价比池价高 10% 被拒；三笔交易排进同一区块后产生 1 条告警。</text>
+</svg>

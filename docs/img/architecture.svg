@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="'Inter','SF Pro Display','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC','Segoe UI',system-ui,sans-serif">
+<!-- UniGo-DEX · 整体架构 -->
+<defs>
+<linearGradient id="g-client" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+<linearGradient id="g-gate" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0891b2"/></linearGradient>
+<linearGradient id="g-core" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+<linearGradient id="g-teal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/></linearGradient>
+<linearGradient id="g-state" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#047857"/></linearGradient>
+<linearGradient id="g-chain" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#c2410c"/></linearGradient>
+<linearGradient id="g-risk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#9d174d"/></linearGradient>
+<linearGradient id="g-violet" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/></linearGradient>
+<linearGradient id="g-grey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#475569"/><stop offset="1" stop-color="#334155"/></linearGradient>
+<linearGradient id="g-chip" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+<linearGradient id="g-title" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#a78bfa"/><stop offset="1" stop-color="#f9a8d4"/></linearGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#ffffff" fill-opacity=".04"/></pattern>
+<filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".3"/></filter>
+<filter id="glow" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="8" result="b"/><feFlood flood-color="#38bdf8" flood-opacity=".55"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#fbbf24"/></marker>
+<marker id="a-tx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f472b6"/></marker>
+<style>
+.layer{fill:#ffffff;fill-opacity:.03;stroke:#ffffff;stroke-opacity:.1;stroke-width:1}
+.lt{font-size:12px;font-weight:700;letter-spacing:1.5px;fill:#8b949e}
+.box{stroke:rgba(255,255,255,.15);stroke-width:1.2}
+.tag{font:500 10px 'JetBrains Mono','SF Mono',Menlo,Consolas,'PingFang SC','Microsoft YaHei',monospace;fill:#fff;fill-opacity:.72}
+.t{font-size:15px;font-weight:700;fill:#fff}
+.s{font-size:11px;fill:#fff;fill-opacity:.82}
+.c1{font-size:13px;font-weight:700;fill:#fff}
+.c2{font-size:10px;fill:#fff;fill-opacity:.8}
+.note{font-size:11px;fill:#8b949e}
+.p{font-size:12px;fill:#c9d1d9}
+.hl{font-size:12px;font-weight:700;fill:#7dd3fc}
+.sync{fill:none;stroke:#38bdf8;stroke-width:1.8}
+.async{fill:none;stroke:#fbbf24;stroke-width:1.8;stroke-dasharray:5 5;animation:flow 1.2s linear infinite}
+.tx{fill:none;stroke:#f472b6;stroke-width:1.8}
+@keyframes flow{to{stroke-dashoffset:-20}}
+@media (prefers-reduced-motion:reduce){.async{animation:none}}
+</style>
+</defs>
+
+<rect width="1200" height="800" fill="#0d1117"/><rect width="1200" height="800" fill="url(#dots)"/>
+<text x="40" y="40" font-size="24" font-weight="800" fill="url(#g-title)">UniGo-DEX · 整体架构</text>
+<text x="40" y="62" font-size="12.5" fill="#8b949e">链上 Solidity 合约 + 链下 Go 后端 + The Graph 子图。请求自上而下，合约事件自下而上。</text>
+<path class="sync" d="M842 36 H882" marker-end="url(#a-sync)"/>
+<text class="note" x="890" y="40" text-anchor="start" >调用</text>
+<path class="async" d="M936 36 H976" marker-end="url(#a-async)"/>
+<text class="note" x="984" y="40" text-anchor="start" >合约事件</text>
+<path class="tx" d="M1054 36 H1094" marker-end="url(#a-tx)"/>
+<text class="note" x="1102" y="40" text-anchor="start" >链上交易</text>
+<!-- Layer 1: Client -->
+<rect class="layer" x="40" y="76" width="1120" height="72" rx="12"/>
+<text class="lt" x="64" y="93" text-anchor="start">CLIENT 客户端</text>
+<rect class="box" x="64" y="98" width="346" height="42" rx="8" ry="8" fill="url(#g-client)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="237.0" y="114.0">[Wallet] 签 EIP-712 和交易</text><text class="t" style="font-size:14px" x="237.0" y="132.0">钱包 / DApp 前端</text></g>
+<rect class="box" x="427" y="98" width="346" height="42" rx="8" ry="8" fill="url(#g-client)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="600.0" y="114.0">[Client] HTTP API</text><text class="t" style="font-size:14px" x="600.0" y="132.0">交易客户端 / 套利机器人</text></g>
+<rect class="box" x="790" y="98" width="346" height="42" rx="8" ry="8" fill="url(#g-client)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="963.0" y="114.0">[Stream] Server-Sent Events</text><text class="t" style="font-size:14px" x="963.0" y="132.0">行情订阅端</text></g>
+<path class="sync" d="M164 140 V190" marker-end="url(#a-sync)"/>
+<path class="sync" d="M600 140 V160 H164"/>
+<path class="sync" d="M963 140 V160 H600"/>
+<text class="note" x="975" y="164" text-anchor="start" >HTTP · JSON / SSE</text>
+<!-- Layer 2: Gateway -->
+<rect class="layer" x="40" y="170" width="1120" height="86" rx="12"/>
+<text class="lt" x="288" y="187" text-anchor="start">GATEWAY 接入层 · backend/api</text>
+<rect class="box" x="64" y="192" width="200" height="54" rx="8" ry="8" fill="url(#g-gate)" filter="url(#glow)"/>
+<g text-anchor="middle"><text class="tag" x="164.0" y="212.0">[Entry] net/http</text><text class="t" style="font-size:18px" x="164.0" y="234.0">API Server</text></g>
+<rect class="box" x="288" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="353.5" y="218.0">Trace ID</text><text class="c2" x="353.5" y="233.0">贯穿请求的日志</text></g>
+<rect class="box" x="431" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="496.5" y="218.0">令牌桶限流</text><text class="c2" x="496.5" y="233.0">每 IP 100/s · 突发 200</text></g>
+<rect class="box" x="574" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="639.5" y="218.0">并发背压</text><text class="c2" x="639.5" y="233.0">上限 500 · 超限 503</text></g>
+<rect class="box" x="717" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="782.5" y="218.0">EIP-712 验签</text><text class="c2" x="782.5" y="233.0">deadline · nonce · 域</text></g>
+<rect class="box" x="860" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="925.5" y="218.0">交易构造</text><text class="c2" x="925.5" y="233.0">只编码，不托管私钥</text></g>
+<rect class="box" x="1003" y="198" width="131" height="44" rx="8" ry="8" fill="url(#g-chip)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="1068.5" y="218.0">SSE Hub</text><text class="c2" x="1068.5" y="233.0">成交 · K 线 · 告警</text></g>
+<path class="sync" d="M164 246 V267 H1011"/>
+<path class="sync" d="M189 267 V302" marker-end="url(#a-sync)"/>
+<path class="sync" d="M463 267 V302" marker-end="url(#a-sync)"/>
+<path class="sync" d="M737 267 V302" marker-end="url(#a-sync)"/>
+<path class="sync" d="M1011 267 V302" marker-end="url(#a-sync)"/>
+<!-- Layer 3: Core services -->
+<rect class="layer" x="40" y="278" width="1120" height="192" rx="12"/>
+<text class="lt" x="202" y="295" text-anchor="start">CORE 链下核心服务 · Go</text>
+<rect class="box" x="64" y="304" width="250" height="56" rx="8" ry="8" fill="url(#g-teal)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="319.0">[Cache] 同一区块内直接命中</text><text class="t" style="font-size:15px" x="189.0" y="338.0">报价缓存</text><text class="s" x="189.0" y="353.0">Singleflight · key 带区块号</text></g>
+<rect class="box" x="338" y="304" width="250" height="56" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="319.0">[Router] backend/router</text><text class="t" style="font-size:15px" x="463.0" y="338.0">Smart Order Router</text><text class="s" x="463.0" y="353.0">DFS 枚举 ≤ 3 跳 · 200ms 超时降级</text></g>
+<rect class="box" x="612" y="304" width="250" height="56" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="319.0">[Quote] 逐 tick 模拟</text><text class="t" style="font-size:15px" x="737.0" y="338.0">链下报价引擎</text><text class="s" x="737.0" y="353.0">与链上 Quoter 逐位一致</text></g>
+<rect class="box" x="886" y="304" width="250" height="56" rx="8" ry="8" fill="url(#g-violet)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="319.0">[Oracle] backend/oracle</text><text class="t" style="font-size:15px" x="1011.0" y="338.0">价格三方校验</text><text class="s" x="1011.0" y="353.0">现价 · TWAP · Chainlink</text></g>
+<rect class="box" x="64" y="370" width="250" height="56" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="385.0">[MEV] backend/mev</text><text class="t" style="font-size:15px" x="189.0" y="404.0">三明治检测</text><text class="s" x="189.0" y="419.0">同块同池 · 交易前检查</text></g>
+<rect class="box" x="338" y="370" width="250" height="56" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="385.0">[Arb] backend/arb</text><text class="t" style="font-size:15px" x="463.0" y="404.0">套利扫描</text><text class="s" x="463.0" y="419.0">三分搜索最优借入量</text></g>
+<rect class="box" x="612" y="370" width="250" height="56" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="385.0">[Kline] backend/kline</text><text class="t" style="font-size:15px" x="737.0" y="404.0">K 线与成交</text><text class="s" x="737.0" y="419.0">六个周期 · Reorg 后重算</text></g>
+<rect class="box" x="886" y="370" width="250" height="56" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="385.0">[Gas] backend/gas</text><text class="t" style="font-size:15px" x="1011.0" y="404.0">Gas 成本评估</text><text class="s" x="1011.0" y="419.0">EIP-1559 · baseFee + 小费</text></g>
+<path class="sync" d="M588 332 H610" marker-end="url(#a-sync)"/>
+<rect class="box" x="64" y="434" width="1072" height="28" rx="8" fill="url(#g-grey)" filter="url(#shadow)"/>
+<text class="hl" x="80" y="452.5" text-anchor="start" >基础组件</text>
+<text class="p" x="148" y="452.5" text-anchor="start" >math/big 数学库（和链上同一套常数与取整方向）· 三态断路器 · Goroutine 池 · Prometheus 指标 · slog 结构化日志</text>
+<path class="sync" d="M189 462 V518" marker-end="url(#a-sync)"/>
+<text class="note" x="199" y="488" text-anchor="start" >读池子快照</text>
+<path class="async" d="M463 520 V464" marker-end="url(#a-async)"/>
+<text class="note" x="473" y="488" text-anchor="start" >Swap 事件 → 四个订阅者</text>
+<path class="sync" d="M737 462 V518" marker-end="url(#a-sync)"/>
+<text class="note" x="747" y="488" text-anchor="start" >eth_call：slot0 · observe · Quoter · Chainlink</text>
+<!-- Layer 4: State -->
+<rect class="layer" x="40" y="496" width="1120" height="82" rx="12"/>
+<text class="lt" x="886" y="513" text-anchor="start">STATE 链下状态与索引</text>
+<rect class="box" x="64" y="520" width="250" height="50" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="532.5">[State] indexer/pool_state.go</text><text class="t" style="font-size:14px" x="189.0" y="550.5">PoolStateManager</text><text class="s" x="189.0" y="565.5">价格 · tick · 活跃流动性</text></g>
+<rect class="box" x="338" y="520" width="250" height="50" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="532.5">[Indexer] indexer/indexer.go</text><text class="t" style="font-size:14px" x="463.0" y="550.5">事件索引器</text><text class="s" x="463.0" y="565.5">parentHash 查 Reorg · 撤销日志回滚</text></g>
+<rect class="box" x="612" y="520" width="250" height="50" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="532.5">[Chain] go-ethereum</text><text class="t" style="font-size:14px" x="737.0" y="550.5">chain.Client</text><text class="s" x="737.0" y="565.5">内嵌 ABI · 事件解码 · 断路器</text></g>
+<rect class="box" x="886" y="520" width="250" height="50" rx="8" ry="8" fill="url(#g-teal)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="532.5">[Subgraph] The Graph</text><text class="t" style="font-size:14px" x="1011.0" y="550.5">子图</text><text class="s" x="1011.0" y="565.5">事件实体 + 多周期 K 线 → GraphQL</text></g>
+<path class="async" d="M338 545 H316" marker-end="url(#a-async)"/>
+<path class="async" d="M612 545 H590" marker-end="url(#a-async)"/>
+<path class="tx" d="M700 570 V596 H463 V628" marker-end="url(#a-tx)"/>
+<text class="note" x="473" y="590" text-anchor="start" >广播已签名交易 · 查回执</text>
+<path class="async" d="M775 630 V572" marker-end="url(#a-async)"/>
+<path class="async" d="M775 602 H1011 V572" marker-end="url(#a-async)"/>
+<text class="note" x="785" y="596" text-anchor="start" >合约事件 · 子图索引同一批</text>
+<!-- Layer 5: Chain -->
+<rect class="layer" x="40" y="606" width="1120" height="146" rx="12"/>
+<text class="lt" x="64" y="623" text-anchor="start">CHAIN 链上协议 · Solidity 0.8.20</text>
+<rect class="box" x="64" y="630" width="250" height="50" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="642.5">[Factory] UniGoFactory.sol</text><text class="t" style="font-size:14px" x="189.0" y="660.5">UniGoFactory</text><text class="s" x="189.0" y="675.5">CREATE2 部署 Pool · 三档费率</text></g>
+<rect class="box" x="338" y="630" width="250" height="50" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="642.5">[Periphery] UniGoManager.sol</text><text class="t" style="font-size:14px" x="463.0" y="660.5">UniGoManager</text><text class="s" x="463.0" y="675.5">期限 · 滑点 · 多跳 · 精确输出</text></g>
+<rect class="box" x="612" y="630" width="250" height="50" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="642.5">[Core] UniGoPool.sol</text><text class="t" style="font-size:14px" x="737.0" y="660.5">UniGoPool</text><text class="s" x="737.0" y="675.5">mint / burn / swap / flash · TWAP 观测</text></g>
+<rect class="box" x="886" y="630" width="250" height="50" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="642.5">[Arbitrage] FlashArbitrage.sol</text><text class="t" style="font-size:14px" x="1011.0" y="660.5">FlashArbitrage</text><text class="s" x="1011.0" y="675.5">闪电贷 + 两次 swap，一笔交易</text></g>
+<path class="tx" d="M588 655 H610" marker-end="url(#a-tx)"/>
+<path class="tx" d="M886 655 H864" marker-end="url(#a-tx)"/>
+<rect class="box" x="64" y="694" width="524" height="50" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="326.0" y="714.5">[Library] contracts/lib · 11 个库</text><text class="t" style="font-size:13px" x="326.0" y="731.5">Q64.96 定点数 · 512 位 mulDiv · Tick 位图 · 观测环形数组</text></g>
+<rect class="box" x="612" y="694" width="250" height="50" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="706.5">[Quoter] UniGoQuoter.sol</text><text class="t" style="font-size:14px" x="737.0" y="724.5">UniGoQuoter</text><text class="s" x="737.0" y="739.5">revert-catch 模拟报价</text></g>
+<rect class="box" x="886" y="694" width="250" height="50" rx="8" ry="8" fill="url(#g-violet)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="706.5">[Feed] AggregatorV3Interface</text><text class="t" style="font-size:14px" x="1011.0" y="724.5">Chainlink 聚合器</text><text class="s" x="1011.0" y="739.5">latestRoundData 喂价</text></g>
+<path class="tx" d="M737 694 V682" marker-end="url(#a-tx)"/>
+<text class="note" x="40" y="780" text-anchor="start" >5 个合约 + 11 个库 · 合约测试 109 个用例 · Go 单元测试 101 个 · 端到端 12 个场景（自起 Hardhat 节点）</text>
+</svg>

@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="'Inter','SF Pro Display','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC','Segoe UI',system-ui,sans-serif">
+<!-- 索引器与链重组回滚 -->
+<defs>
+<linearGradient id="g-client" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+<linearGradient id="g-gate" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#0891b2"/></linearGradient>
+<linearGradient id="g-core" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+<linearGradient id="g-teal" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/></linearGradient>
+<linearGradient id="g-state" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#047857"/></linearGradient>
+<linearGradient id="g-chain" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#c2410c"/></linearGradient>
+<linearGradient id="g-risk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#9d174d"/></linearGradient>
+<linearGradient id="g-violet" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/></linearGradient>
+<linearGradient id="g-grey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#475569"/><stop offset="1" stop-color="#334155"/></linearGradient>
+<linearGradient id="g-chip" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+<linearGradient id="g-title" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#a78bfa"/><stop offset="1" stop-color="#f9a8d4"/></linearGradient>
+<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#ffffff" fill-opacity=".04"/></pattern>
+<filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".3"/></filter>
+<filter id="glow" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="8" result="b"/><feFlood flood-color="#38bdf8" flood-opacity=".55"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#fbbf24"/></marker>
+<marker id="a-tx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f472b6"/></marker>
+<style>
+.layer{fill:#ffffff;fill-opacity:.03;stroke:#ffffff;stroke-opacity:.1;stroke-width:1}
+.lt{font-size:12px;font-weight:700;letter-spacing:1.5px;fill:#8b949e}
+.box{stroke:rgba(255,255,255,.15);stroke-width:1.2}
+.tag{font:500 10px 'JetBrains Mono','SF Mono',Menlo,Consolas,'PingFang SC','Microsoft YaHei',monospace;fill:#fff;fill-opacity:.72}
+.t{font-size:15px;font-weight:700;fill:#fff}
+.s{font-size:11px;fill:#fff;fill-opacity:.82}
+.c1{font-size:13px;font-weight:700;fill:#fff}
+.c2{font-size:10px;fill:#fff;fill-opacity:.8}
+.note{font-size:11px;fill:#8b949e}
+.p{font-size:12px;fill:#c9d1d9}
+.hl{font-size:12px;font-weight:700;fill:#7dd3fc}
+.sync{fill:none;stroke:#38bdf8;stroke-width:1.8}
+.async{fill:none;stroke:#fbbf24;stroke-width:1.8;stroke-dasharray:5 5;animation:flow 1.2s linear infinite}
+.tx{fill:none;stroke:#f472b6;stroke-width:1.8}
+@keyframes flow{to{stroke-dashoffset:-20}}
+@media (prefers-reduced-motion:reduce){.async{animation:none}}
+</style>
+</defs>
+
+<rect width="1200" height="800" fill="#0d1117"/><rect width="1200" height="800" fill="url(#dots)"/>
+<text x="40" y="40" font-size="24" font-weight="800" fill="url(#g-title)">索引器与链重组回滚</text>
+<text x="40" y="62" font-size="12.5" fill="#8b949e">索引器靠回放合约事件在内存里重建池子状态。区块被重组掉时，按撤销日志倒着退回去，再从分叉点重新索引。</text>
+<!-- Band 1: 检测 -->
+<rect class="layer" x="40" y="76" width="1120" height="220" rx="12"/>
+<text class="lt" x="64" y="93" text-anchor="start">DETECT 用 parentHash 发现分叉</text>
+<text class="note" x="64" y="116" text-anchor="start" >本地已经索引的链</text>
+<rect class="box" x="64" y="124" width="160" height="62" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="144.0" y="143.0">[Block 100]</text><text class="t" style="font-size:13px" x="144.0" y="160.0">hash 0xAAA</text><text class="s" x="144.0" y="175.0">已应用</text></g>
+<rect class="box" x="264" y="124" width="160" height="62" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="344.0" y="143.0">[Block 101]</text><text class="t" style="font-size:13px" x="344.0" y="160.0">hash 0xBBB</text><text class="s" x="344.0" y="175.0">已应用</text></g>
+<rect class="box" x="464" y="124" width="160" height="62" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="544.0" y="143.0">[Block 102]</text><text class="t" style="font-size:13px" x="544.0" y="160.0">hash 0xCCC</text><text class="s" x="544.0" y="175.0">被重组掉，要撤销</text></g>
+<path class="sync" d="M224 155 H262" marker-end="url(#a-sync)"/>
+<path class="sync" d="M424 155 H462" marker-end="url(#a-sync)"/>
+<text class="note" x="464" y="212" text-anchor="start" >节点上现在的链</text>
+<rect class="box" x="464" y="220" width="160" height="62" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="544.0" y="239.0">[Block 102']</text><text class="t" style="font-size:13px" x="544.0" y="256.0">hash 0xDDD</text><text class="s" x="544.0" y="271.0">换了一笔 swap</text></g>
+<rect class="box" x="664" y="220" width="160" height="62" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="744.0" y="239.0">[Block 103']</text><text class="t" style="font-size:13px" x="744.0" y="256.0">parentHash 0xDDD</text><text class="s" x="744.0" y="271.0">新到的区块</text></g>
+<path class="async" d="M344 186 V251 H462" marker-end="url(#a-async)"/>
+<path class="async" d="M624 251 H662" marker-end="url(#a-async)"/>
+<text class="p" x="872" y="134" text-anchor="start" >① 103' 的 parentHash 是 0xDDD</text>
+<text class="p" x="872" y="156" text-anchor="start" >② 本地记的 102 是 0xCCC，对不上</text>
+<text class="p" x="872" y="178" text-anchor="start" >③ 判定 Reorg，往回逐块比哈希</text>
+<text class="p" x="896" y="200" text-anchor="start" >第一个不一致的就是分叉点：102</text>
+<text class="note" x="872" y="240" text-anchor="start" >本地只留最近 2 × 12 = 24 个区块的哈希</text>
+<text class="note" x="872" y="258" text-anchor="start" >（CONFIRMATION_BLOCKS 默认 12）</text>
+<!-- Band 2: 撤销日志 -->
+<rect class="layer" x="40" y="316" width="1120" height="236" rx="12"/>
+<text class="lt" x="64" y="333" text-anchor="start">UNDO 撤销日志：应用事件时顺手记下怎么撤</text>
+<rect class="box" x="64" y="376" width="156" height="62" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="142.0" y="394.5">[区块 100]</text><text class="t" style="font-size:14px" x="142.0" y="412.5">Mint</text><text class="s" x="142.0" y="427.5">撤销：等量 Burn</text></g>
+<rect class="box" x="236" y="376" width="156" height="62" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="314.0" y="394.5">[区块 101]</text><text class="t" style="font-size:14px" x="314.0" y="412.5">Swap</text><text class="s" x="314.0" y="427.5">撤销：恢复成交前快照</text></g>
+<rect class="box" x="408" y="376" width="156" height="62" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="486.0" y="394.5">[区块 102]</text><text class="t" style="font-size:14px" x="486.0" y="412.5">Swap</text><text class="s" x="486.0" y="427.5">撤销：恢复成交前快照</text></g>
+<rect class="box" x="580" y="376" width="156" height="62" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="658.0" y="394.5">[区块 102]</text><text class="t" style="font-size:14px" x="658.0" y="412.5">Mint</text><text class="s" x="658.0" y="427.5">撤销：等量 Burn</text></g>
+<rect class="box" x="752" y="376" width="156" height="62" rx="8" ry="8" fill="url(#g-risk)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="830.0" y="394.5">[区块 102]</text><text class="t" style="font-size:14px" x="830.0" y="412.5">Swap</text><text class="s" x="830.0" y="427.5">撤销：恢复成交前快照</text></g>
+<path class="tx" d="M908 364 H410" marker-end="url(#a-tx)"/>
+<text class="hl" x="659" y="356" text-anchor="middle" >从最后一条开始，逆序执行区块 ≥ 102 的撤销动作</text>
+<text class="hl" x="940" y="388" text-anchor="start" >为什么必须逆序：</text>
+<text class="p" x="940" y="407" text-anchor="start" >Mint 的撤销要不要动活跃流动性，</text>
+<text class="p" x="940" y="426" text-anchor="start" >取决于当时的 tick。得先把它后面</text>
+<text class="p" x="940" y="445" text-anchor="start" >的 Swap 撤掉，tick 才是对的。</text>
+<text class="p" x="64" y="464" text-anchor="start" >其它事件：PoolCreated → 移除池子 · Initialize → 价格清零 · Burn → 等量 Mint。超出回滚窗口的条目随处理进度丢弃。</text>
+<rect class="box" x="64" y="486" width="204" height="48" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="166.0" y="508.0">K 线</text><text class="c2" x="166.0" y="523.0">按区块检查点回滚后重算</text></g>
+<rect class="box" x="284" y="486" width="204" height="48" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="386.0" y="508.0">MEV 告警</text><text class="c2" x="386.0" y="523.0">丢弃分叉点之后的</text></g>
+<rect class="box" x="504" y="486" width="204" height="48" rx="8" ry="8" fill="url(#g-grey)" filter="url(#shadow)"/><g text-anchor="middle"><text class="c1" x="606.0" y="508.0">套利机会</text><text class="c2" x="606.0" y="523.0">全部作废，等重新评估</text></g>
+<path class="async" d="M756 510 H726" marker-end="url(#a-async)"/>
+<text class="p" x="766" y="514" text-anchor="start" >OnReorg(forkBlock)：订阅者各自丢弃分叉后的数据</text>
+<!-- Band 3: 重新索引 -->
+<rect class="layer" x="40" y="572" width="1120" height="140" rx="12"/>
+<text class="lt" x="64" y="589" text-anchor="start">REINDEX 从分叉点重新索引（平时追块也是这四步）</text>
+<rect class="box" x="64" y="604" width="250" height="92" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="189.0" y="637.0">[1] BlockByNumber</text><text class="t" style="font-size:15px" x="189.0" y="656.0">逐个取区块头</text><text class="s" x="189.0" y="671.0">检查段内 parentHash 首尾相接</text></g>
+<rect class="box" x="338" y="604" width="250" height="92" rx="8" ry="8" fill="url(#g-core)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="463.0" y="637.0">[2] eth_getLogs</text><text class="t" style="font-size:15px" x="463.0" y="656.0">一次拉整段的日志</text><text class="s" x="463.0" y="671.0">每段最多 500 个区块</text></g>
+<rect class="box" x="612" y="604" width="250" height="92" rx="8" ry="8" fill="url(#g-chain)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="737.0" y="637.0">[3] 核对 blockHash</text><text class="t" style="font-size:15px" x="737.0" y="656.0">日志和区块头对得上吗</text><text class="s" x="737.0" y="671.0">对不上：整段作废，下一轮重读</text></g>
+<rect class="box" x="886" y="604" width="250" height="92" rx="8" ry="8" fill="url(#g-state)" filter="url(#shadow)"/>
+<g text-anchor="middle"><text class="tag" x="1011.0" y="637.0">[4] handleEvent</text><text class="t" style="font-size:15px" x="1011.0" y="656.0">按 logIndex 顺序应用</text><text class="s" x="1011.0" y="671.0">更新池子状态，同时记撤销动作</text></g>
+<path class="sync" d="M314 650 H336" marker-end="url(#a-sync)"/>
+<path class="sync" d="M588 650 H610" marker-end="url(#a-sync)"/>
+<path class="sync" d="M862 650 H884" marker-end="url(#a-sync)"/>
+<text class="note" x="40" y="742" text-anchor="start" >实测（本地 Hardhat 节点，带全部订阅者）：一次深度 10 的 Reorg，回滚并重新索引 11 个区块、22 个事件，中位 5.07 ms；</text>
+<text class="note" x="40" y="762" text-anchor="start" >从创世块追 680 个区块、3036 个事件，中位 193 ms（3,517 区块/秒）。日志改成按段批量拉之前是 2,364 区块/秒。</text>
+</svg>
